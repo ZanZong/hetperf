@@ -457,7 +457,7 @@ def _build_index_mappings(name, data_prefix, documents, sizes,
     #     torch.distributed.get_world_size() //
     #     torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group())):
     #     print_rank_0("Data index creation unsuccessful, exiting.")
-    #     exit()
+    #     
 
     # Load mappings.
     start_time = time.time()

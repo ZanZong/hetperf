@@ -133,6 +133,7 @@ def _batched_p2p_ops(
     local_rank = torch.distributed.get_rank()
     preds = [pred for pred in g.predecessors(local_rank)]
     succs = [succ for succ in g.successors(local_rank)]
+    # print(f"local rank={torch.distributed.get_rank()}, _batched_p2p_ops preds num={len(preds)}, succs num={len(succs)}", flush=True)
     if tensor_send_prev is not None:
         # Shard the tensor along the "batch" dimension
         sharded_tensors = torch.chunk(tensor_send_prev, len(preds), dim=1)
@@ -313,7 +314,8 @@ def _communicate(
                 "tensor_shape must be specified if recv_prev is True. "
                 "Common tensor_shape is (seq_length, micro_batch_size, hidden_size)"
             )
-        tensor_recv_prev = torch.empty(
+        # Original torch.empty() will raise nan tensor, change to zeros
+        tensor_recv_prev = torch.zeros(
             recv_prev_shape,
             requires_grad=True,
             device=torch.cuda.current_device(),

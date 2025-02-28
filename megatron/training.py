@@ -627,7 +627,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                 mem_stats["allocation.all.current"],
                 iteration,
             )
-
+    report_memory_flag = True
     if iteration % args.log_interval == 0:
         elapsed_time = timers('interval-time').elapsed(barrier=True)
         elapsed_time_per_iteration = elapsed_time / total_iterations
@@ -744,6 +744,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                        optimizer,
                        opt_param_scheduler,
                        config)
+        torch.cuda.synchronize()
+        print(f"local rank={torch.distributed.get_rank()}, iter {iteration} complete!", flush=True)
         iteration += 1
         args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
                                        args.micro_batch_size * \
@@ -751,16 +753,21 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
         # Logging.
         loss_scale = optimizer.get_loss_scale().item()
+        torch.cuda.synchronize()
+        print(f"local rank={torch.distributed.get_rank()}, optimizer get loss scale!:{loss_scale}", flush=True)
         losses.append(loss_scale)
         params_norm = None
         if args.log_params_norm:
             params_norm = calc_params_l2_norm(model)
+        torch.cuda.synchronize()
+        print(f"local rank={torch.distributed.get_rank()}, brefore report training log", flush=True)
         report_memory_flag = training_log(loss_dict, total_loss_dict,
                                           optimizer.param_groups[0]['lr'],
                                           iteration, loss_scale,
                                           report_memory_flag, skipped_iter,
                                           grad_norm, params_norm, num_zeros_in_grad)
-
+        torch.cuda.synchronize()
+        print(f"local rank={torch.distributed.get_rank()}, after logging", flush=True)
         # Autoresume
         if args.adlr_autoresume and \
            (iteration % args.adlr_autoresume_interval == 0):

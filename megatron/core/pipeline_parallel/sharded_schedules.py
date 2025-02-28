@@ -1270,8 +1270,11 @@ def forward_backward_pipelining_without_interleaving(
     print(f"Start schedule: local rank={local_rank}, pipeline_stage={parallel_state.get_pipeline_model_parallel_rank()} in {parallel_state.get_pipeline_model_parallel_group_id()}-th pipeline.", flush=True)
     current_graph = args.pipe_graph[parallel_state.get_pipeline_model_parallel_group_id()]
     predes = [pred for pred in current_graph.predecessors(local_rank)]
+    succs = [succ for succ in current_graph.successors(local_rank)]
+    print(f"local rank={local_rank}, preds={predes}, succes={succs}", flush=True)
     # assert all predecessor->local_rank edges have the same input tensor shapes
-    stage_input_bs = current_graph[predes[0]][local_rank]["weight"]
+    stage_input_bs = sum(current_graph[pred][local_rank]["weight"] for pred in predes) 
+    stage_output_bs = sum(current_graph[local_rank][succ]["weight"] for succ in succs) if len(succs) > 0 else args.micro_batch_size
 
     recv_tensor_shapes = get_tensor_shapes(
         rank=rank - 1,
@@ -1285,7 +1288,7 @@ def forward_backward_pipelining_without_interleaving(
         rank=rank,
         model_type=model_type,
         seq_length=seq_length,
-        micro_batch_size=stage_input_bs,
+        micro_batch_size=stage_output_bs,
         decoder_seq_length=decoder_seq_length,
         config=config,
     )
@@ -1322,6 +1325,10 @@ def forward_backward_pipelining_without_interleaving(
             collect_non_loss_data,
             checkpoint_activations_microbatch,
         )
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"rank 0 stage output={output_tensor}, id={i}", flush=True)
+        # if torch.distributed.get_rank() == 1:
+        #     print(f"rank 1 stage output={output_tensor}, id={i}", flush=True)
         send_forward(output_tensor, send_tensor_shapes, config)
         print(f"rank {local_rank} send forward {i}", flush=True)
         if not forward_only:
@@ -1359,7 +1366,10 @@ def forward_backward_pipelining_without_interleaving(
             collect_non_loss_data,
             checkpoint_activations_microbatch,
         )
-
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"rank 0 stage output={output_tensor}, id={i + num_warmup_microbatches}", flush=True)
+        # if torch.distributed.get_rank() == 1:
+        #     print(f"rank 1 stage output={output_tensor}, id={i + num_warmup_microbatches}", flush=True)
         if forward_only:
             send_forward(output_tensor, send_tensor_shapes, config)
 
@@ -1367,7 +1377,7 @@ def forward_backward_pipelining_without_interleaving(
                 input_tensor = recv_forward(recv_tensor_shapes, config)
 
         else:
-            print(f"rank {local_rank}, send_forward_recv_backward {i + num_warmup_microbatches}.", flush=True)
+            # print(f"rank {local_rank}, send_forward_recv_backward {i + num_warmup_microbatches}.", flush=True)
             output_tensor_grad = send_forward_recv_backward(
                 output_tensor, send_tensor_shapes, config
             )
@@ -1441,5 +1451,7 @@ def forward_backward_pipelining_without_interleaving(
         # data parallelism, layernorm all-reduce for sequence parallelism, and
         # embedding all-reduce for pipeline parallelism).
         config.finalize_model_grads_func([model])
-
+    
+    print(f"rank={torch.distributed.get_rank()} done schedule", flush=True)
+    torch.distributed.barrier()
     return forward_data_store

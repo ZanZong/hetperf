@@ -99,6 +99,18 @@ def get_batch(data_iterator):
     labels = tokens_[:, 1:].contiguous()
     tokens = tokens_[:, :-1].contiguous()
 
+    if parallel_state.is_pipeline_first_stage():
+        first_stage_devices = args.pipe_stage_device[parallel_state.get_pipeline_model_parallel_group_id()][0]
+        shard_index = first_stage_devices.index(torch.distributed.get_rank())
+        shard_num = len(first_stage_devices)
+        shard_index = shard_index
+        if shard_num > 1:
+            sharded_tokens = torch.chunk(tokens, shard_num, dim=0)
+            tokens = sharded_tokens[shard_index]
+            sharded_labels = torch.chunk(labels, shard_num, dim=0)
+            labels = sharded_labels[shard_index]
+            print(f"First stage, after sharded tokens shape={tokens.shape}, labels shape={labels.shape}", flush=True)
+
     if parallel_state.is_pipeline_last_stage():
         # shard data according to dependency
         last_stage_devices = args.pipe_stage_device[parallel_state.get_pipeline_model_parallel_group_id()][-1]
@@ -109,13 +121,13 @@ def get_batch(data_iterator):
         # sharded_batch_size = g[pred][torch.distributed.get_rank()]["weight"]
         shard_num = len(last_stage_devices)
         shard_index = shard_index
-        print(f"get_batch tokens shape={tokens.shape}, labels shape={labels.shape}", flush=True)
+        print(f"get_batch tokens shape={tokens.shape}, labels shape={labels.shape}, shard num={shard_num}", flush=True)
         if shard_num > 1:
             sharded_tokens = torch.chunk(tokens, shard_num, dim=0)
             tokens = sharded_tokens[shard_index]
             sharded_labels = torch.chunk(labels, shard_num, dim=0)
             labels = sharded_labels[shard_index]
-            print(f"after sharded tokens shape={tokens.shape}, labels shape={labels.shape}", flush=True)
+            print(f"Last stage, after sharded tokens shape={tokens.shape}, labels shape={labels.shape}", flush=True)
     
     # Get the masks and postition ids.
     attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
@@ -138,7 +150,7 @@ def loss_func(loss_mask: Tensor, output_tensor: Tensor):
     losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
-
+    print(f"rank={torch.distributed.get_rank()}, get loss={loss}, pp output = {output_tensor}", flush=True)
     # Check individual rank losses are not NaN prior to DP all-reduce.
     if args.check_for_nan_in_loss_and_grad:
         global_rank = torch.distributed.get_rank()

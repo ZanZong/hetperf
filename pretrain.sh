@@ -9,7 +9,7 @@ export RANK=$SLURM_PROCID
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # for async gradient all reduce
 
 current_hostname=$(hostname)
-if [ "$current_hostname" == "octave" ]; then
+if [ "$current_hostname" == "octave" ] || [ "$current_hostname" == "twills" ]; then
     export GLOO_SOCKET_IFNAME=eno1
     export NCCL_SOCKET_IFNAME=eno1
 else
@@ -60,8 +60,9 @@ exec python \
         --init-method-std 0.002 \
         --fp16 \
         --recompute-granularity selective \
-        --hetero-cluster False \
-        --parallel-config /home/zanzong/workspace/Megatron-LM/tangram_config_twi_oct.json
+        --hetero-cluster True \
+        --parallel-config /home/zanzong/workspace/Megatron-LM/configs/tangram_config_octave_twills.json
+        # --use-distributed-optimizer \
         # --enable-hetero-compression $COMPRESS \
         # --stage-layer-num $LL
         # --recompute-granularity full \

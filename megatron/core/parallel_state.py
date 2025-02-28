@@ -218,10 +218,10 @@ def initialize_model_parallel(
     args.pipe_stage_device = pipe_stage_device
     print(f"args.pipe_depth={args.pipe_depth}\n\n", flush=True)
     args.pipe_graph = pipe_graph
-    init_group_from_config = True
     for graph, depth in zip(args.pipe_graph, args.pipe_depth):
         set_micro_batch_dp_dispatcher(graph, depth, args.parallel_config["micro_batch_size"])
         set_micro_batch_dp_dispatcher(graph, depth, args.parallel_config["micro_batch_size"])
+    init_group_from_config = True
     
     global _DATA_PARALLEL_GROUP
     global _DATA_PARALLEL_GROUP_GLOO
@@ -244,9 +244,7 @@ def initialize_model_parallel(
     global _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP
     global _TENSOR_AND_EXPERT_PARALLEL_GROUP
     global _DATA_MODULO_EXPERT_PARALLEL_GROUP
-    
-    if init_group_from_config:
-
+    if init_group_from_config:        
         if virtual_pipeline_model_parallel_size is not None:
             raise RuntimeError("virtual pipeline model paralllel is to be supported.")
         num_tensor_model_parallel_groups = len(parallel_groups["tp"])

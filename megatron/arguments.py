@@ -60,71 +60,71 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
 
 def validate_args(args, defaults={}):
     # Skip check because of the flexible pipeline
-    """
-    # Tensor model parallel size.
-    args.tensor_model_parallel_size = min(
-        args.tensor_model_parallel_size, args.world_size)
-    assert args.world_size % args.tensor_model_parallel_size == 0, 'world size'\
-        ' ({}) is not divisible by tensor model parallel size ({})'.format(
-            args.world_size, args.tensor_model_parallel_size)
-    # Pipeline model parallel size.
-    args.pipeline_model_parallel_size = min(
-        args.pipeline_model_parallel_size,
-        (args.world_size // args.tensor_model_parallel_size))
-    args.transformer_pipeline_model_parallel_size = (
-        args.pipeline_model_parallel_size - 1
-        if args.standalone_embedding_stage else
-        args.pipeline_model_parallel_size
-    )
-    # Checks.
-    model_parallel_size = args.pipeline_model_parallel_size * \
-                          args.tensor_model_parallel_size
-    assert args.world_size % model_parallel_size == 0, 'world size ({}) is not'\
-        ' divisible by tensor parallel size ({}) times pipeline parallel ' \
-        'size ({})'.format(args.world_size, args.tensor_model_parallel_size,
-                           args.pipeline_model_parallel_size)
-    args.data_parallel_size = args.world_size // model_parallel_size
-    if args.rank == 0:
-        print('using world size: {}, data-parallel-size: {}, '
-              'tensor-model-parallel size: {}, '
-              'pipeline-model-parallel size: {} '.format(
-                  args.world_size, args.data_parallel_size,
-                  args.tensor_model_parallel_size,
-                  args.pipeline_model_parallel_size), flush=True)
-    if args.pipeline_model_parallel_size > 1:
-        if args.pipeline_model_parallel_split_rank is not None:
-            assert args.pipeline_model_parallel_split_rank < \
-                    args.pipeline_model_parallel_size, 'split rank needs'\
-                    ' to be less than pipeline model parallel size ({})'.format(
+    init_group_from_config = True
+    if init_group_from_config:
+        if args.hetero_cluster:
+            if not hasattr(args, "stage_recompute_num_layers"):
+                args.stage_recompute_num_layers = None
+            
+            if args.parallel_config != "":
+                try:
+                    with open(args.parallel_config, "r", encoding="utf-8") as file:
+                        args.parallel_config = json.load(file)
+                    deps_builder = {}
+                    for key, val in args.parallel_config["pipe_deps"].items():
+                        deps_builder[int(key)] = val
+                    del args.parallel_config["pipe_deps"]
+                    args.parallel_config["pipe_deps"] = deps_builder
+                except FileNotFoundError:
+                    print(f"Config file {args.parallel_config} not found.")
+                except json.JSONDecodeError:
+                    print(f"Config file {args.parallel_config} format error.")
+            print(f"parse parallel config: {args.parallel_config}", flush=True)
+
+        # TODO auto configure this through config file.
+        args.tensor_model_parallel_size = args.parallel_config["tensor_parallel_size"]
+        args.data_parallel_size = args.parallel_config["data_parallel_size"]
+        args.pipeline_model_parallel_size = args.parallel_config["pipeline_parallel_size"]
+        args.transformer_pipeline_model_parallel_size = args.pipeline_model_parallel_size
+        args.world_size = int(os.getenv("WORLD_SIZE", 1))
+    else:
+        # Tensor model parallel size.
+        args.tensor_model_parallel_size = min(
+            args.tensor_model_parallel_size, args.world_size)
+        assert args.world_size % args.tensor_model_parallel_size == 0, 'world size'\
+            ' ({}) is not divisible by tensor model parallel size ({})'.format(
+                args.world_size, args.tensor_model_parallel_size)
+        # Pipeline model parallel size.
+        args.pipeline_model_parallel_size = min(
+            args.pipeline_model_parallel_size,
+            (args.world_size // args.tensor_model_parallel_size))
+        args.transformer_pipeline_model_parallel_size = (
+            args.pipeline_model_parallel_size - 1
+            if args.standalone_embedding_stage else
+            args.pipeline_model_parallel_size
+        )
+        # Checks.
+        model_parallel_size = args.pipeline_model_parallel_size * \
+                            args.tensor_model_parallel_size
+        assert args.world_size % model_parallel_size == 0, 'world size ({}) is not'\
+            ' divisible by tensor parallel size ({}) times pipeline parallel ' \
+            'size ({})'.format(args.world_size, args.tensor_model_parallel_size,
                             args.pipeline_model_parallel_size)
-    """
+        args.data_parallel_size = args.world_size // model_parallel_size
+        if args.rank == 0:
+            print('using world size: {}, data-parallel-size: {}, '
+                'tensor-model-parallel size: {}, '
+                'pipeline-model-parallel size: {} '.format(
+                    args.world_size, args.data_parallel_size,
+                    args.tensor_model_parallel_size,
+                    args.pipeline_model_parallel_size), flush=True)
+        if args.pipeline_model_parallel_size > 1:
+            if args.pipeline_model_parallel_split_rank is not None:
+                assert args.pipeline_model_parallel_split_rank < \
+                        args.pipeline_model_parallel_size, 'split rank needs'\
+                        ' to be less than pipeline model parallel size ({})'.format(
+                                args.pipeline_model_parallel_size)
 
-    if args.hetero_cluster:
-        if not hasattr(args, "stage_recompute_num_layers"):
-            args.stage_recompute_num_layers = None
-        
-        if args.parallel_config != "":
-            try:
-                with open(args.parallel_config, "r", encoding="utf-8") as file:
-                    args.parallel_config = json.load(file)
-                deps_builder = {}
-                for key, val in args.parallel_config["pipe_deps"].items():
-                    deps_builder[int(key)] = val
-                del args.parallel_config["pipe_deps"]
-                args.parallel_config["pipe_deps"] = deps_builder
-            except FileNotFoundError:
-                print(f"Config file {args.parallel_config} not found.")
-            except json.JSONDecodeError:
-                print(f"Config file {args.parallel_config} format error.")
-        print(f"parse parallel config: {args.parallel_config}", flush=True)
-
-    # TODO auto configure this through config file.
-    args.tensor_model_parallel_size = args.parallel_config["tensor_parallel_size"]
-    args.data_parallel_size = args.parallel_config["data_parallel_size"]
-    args.pipeline_model_parallel_size = args.parallel_config["pipeline_parallel_size"]
-    args.transformer_pipeline_model_parallel_size = args.pipeline_model_parallel_size
-    args.world_size = int(os.getenv("WORLD_SIZE", 1))
-    
     # Deprecated arguments
     assert args.batch_size is None, '--batch-size argument is no longer ' \
         'valid, use --micro-batch-size instead'
