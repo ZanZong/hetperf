@@ -87,6 +87,10 @@ def validate_args(args, defaults={}):
         args.pipeline_model_parallel_size = args.parallel_config["pipeline_parallel_size"]
         args.transformer_pipeline_model_parallel_size = args.pipeline_model_parallel_size
         args.world_size = int(os.getenv("WORLD_SIZE", 1))
+        if args.parallel_config["micro_batch_size"] is not None:
+            args.micro_batch_size = int(args.parallel_config["micro_batch_size"])
+        if args.parallel_config["global_batch_size"] is not None:
+            args.global_batch_size = int(args.parallel_config["global_batch_size"])
     else:
         # Tensor model parallel size.
         args.tensor_model_parallel_size = min(

@@ -22,12 +22,17 @@ export MASTER_PORT=$(expr $RANDOM % 10000 + 10000)
 # export NODELIST=octave,twills
 # export GPUS_PER_NODE=4
 
+# code repo path
+export REPO_PATH="/home/gmk/hetperf"
+# python venv path
+export SOURCE_PATH="/home/gmk/hetperf-env"
+
 export EXP_NAME="hetero-train"
-export MODEL_NAME="GPT-6.2B"
-export GLOBAL_BATCH_SIZE=32
-export MICRO_BATCH_SIZE=4
-export NODELIST=octave,twills
-export WORLD_SIZE=6
+export MODEL_NAME="GPT-1.3B"
+export GLOBAL_BATCH_SIZE=64
+export MICRO_BATCH_SIZE=8
+export NODELIST=octave,ja[1-4]
+export WORLD_SIZE=8
 
 export NUM_LAYERS=-1
 export HIDDEN_SIZE=-1
@@ -89,6 +94,29 @@ mkdir -p $PROFILER_LOG_PATH
 
 NNODES=$(scontrol show hostnames ${NODELIST} | wc -l)
 
+# ja+octave
+srun \
+    -A public \
+    -p octave \
+    -K \
+    -N 1 \
+    -w octave \
+    --job-name=$EXP_NAME \
+	--ntasks-per-node=4 \
+    --gres=gpu:a100:4 \
+    --export=ALL \
+    bash pretrain.sh : \
+    -A public \
+    -p ja \
+    -K \
+    -N 4 \
+    -w ja[1-4] \
+    --job-name=$EXP_NAME \
+    --ntasks-per-node=1 \
+    --gres=gpu:v100:1 \
+    --export=ALL \
+    bash pretrain.sh
+
 # # single job
 # srun \
 #     -A long \
@@ -137,24 +165,24 @@ NNODES=$(scontrol show hostnames ${NODELIST} | wc -l)
 #     bash pretrain.sh
 
 # # octave+twills
-srun \
-    -A long \
-    -p long \
-    -K \
-    -N 1 \
-    -w octave \
-    --job-name=$EXP_NAME \
-    --ntasks-per-node=4 \
-    --gres=gpu:a100:4 \
-    --export=ALL \
-    bash pretrain.sh : \
-    -A long \
-    -p long \
-    -K \
-    -N 1 \
-    -w twills \
-    --job-name=$EXP_NAME \
-    --ntasks-per-node=2 \
-    --gres=gpu:v100:2 \
-    --export=ALL \
-    bash pretrain.sh
+# srun \
+#     -A long \
+#     -p long \
+#     -K \
+#     -N 1 \
+#     -w octave \
+#     --job-name=$EXP_NAME \
+#     --ntasks-per-node=4 \
+#     --gres=gpu:a100:4 \
+#     --export=ALL \
+#     bash pretrain.sh : \
+#     -A long \
+#     -p long \
+#     -K \
+#     -N 1 \
+#     -w twills \
+#     --job-name=$EXP_NAME \
+#     --ntasks-per-node=2 \
+#     --gres=gpu:v100:2 \
+#     --export=ALL \
+#     bash pretrain.sh

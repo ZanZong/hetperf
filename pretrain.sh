@@ -20,8 +20,8 @@ export NCCL_IB_DISABLE=1
 
 DATETIME=`date +'date_%y-%m-%d_time_%H-%M-%S'`
 
-source ~/workspace/mega-env/bin/activate
-cd /home/zanzong/workspace/Megatron-LM
+source $SOURCE_PATH/bin/activate
+cd $REPO_PATH
 
 VOCAB_FILE=~/datasets/wikidataset/gpt2-vocab.json
 MERGE_FILE=~/datasets/wikidataset/gpt2-merges.txt
@@ -61,7 +61,7 @@ exec python \
         --fp16 \
         --recompute-granularity selective \
         --hetero-cluster True \
-        --parallel-config /home/zanzong/workspace/Megatron-LM/configs/tangram_config_octave_twills.json
+        --parallel-config ./configs/tangram_config_oct_ja.json
         # --use-distributed-optimizer \
         # --enable-hetero-compression $COMPRESS \
         # --stage-layer-num $LL

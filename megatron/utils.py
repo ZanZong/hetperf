@@ -239,7 +239,7 @@ def print_rank_last(message):
     else:
         print(message, flush=True)
 
-def print_hetero_device_memory():
+def print_hetero_device_memory(message):
     """Print memory usage of the first pipeline stage of heterogeneous devices."""
     rank_list_to_print = [0, 4]
     if torch.distributed.is_initialized():
