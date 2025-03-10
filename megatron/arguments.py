@@ -82,7 +82,11 @@ def validate_args(args, defaults={}):
             print(f"parse parallel config: {args.parallel_config}", flush=True)
 
         # TODO auto configure this through config file.
-        args.tensor_model_parallel_size = args.parallel_config["tensor_parallel_size"]
+        tp_size = args.parallel_config["tensor_parallel_size"]
+        if isinstance(tp_size, list):
+            args.tensor_model_parallel_size = tp_size[torch.cuda.current_device()]
+        else:
+            args.tensor_model_parallel_size = int(tp_size)
         args.data_parallel_size = args.parallel_config["data_parallel_size"]
         args.pipeline_model_parallel_size = args.parallel_config["pipeline_parallel_size"]
         args.transformer_pipeline_model_parallel_size = args.pipeline_model_parallel_size

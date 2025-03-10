@@ -1268,19 +1268,24 @@ def forward_backward_pipelining_without_interleaving(
     rank = parallel_state.get_pipeline_model_parallel_rank()
     local_rank = torch.distributed.get_rank()
     print(f"Start schedule: local rank={local_rank}, pipeline_stage={parallel_state.get_pipeline_model_parallel_rank()} in {parallel_state.get_pipeline_model_parallel_group_id()}-th pipeline.", flush=True)
-    current_graph = args.pipe_graph[parallel_state.get_pipeline_model_parallel_group_id()]
-    predes = [pred for pred in current_graph.predecessors(local_rank)]
-    succs = [succ for succ in current_graph.successors(local_rank)]
-    print(f"local rank={local_rank}, preds={predes}, succes={succs}", flush=True)
-    # assert all predecessor->local_rank edges have the same input tensor shapes
-    stage_input_bs = sum(current_graph[pred][local_rank]["weight"] for pred in predes) 
-    stage_output_bs = sum(current_graph[local_rank][succ]["weight"] for succ in succs) if len(succs) > 0 else args.micro_batch_size
+    # current_graph = args.pipe_graph[parallel_state.get_pipeline_model_parallel_group_id()]
+    # predes = [pred for pred in current_graph.predecessors(local_rank)]
+    # succs = [succ for succ in current_graph.successors(local_rank)]
+    # # print(f"local rank={local_rank}, preds={predes}, succes={succs}", flush=True)
+    # # assert all predecessor->local_rank edges have the same input tensor shapes
+    # stage_input_bs = sum(current_graph[pred][local_rank]["micro_batch_size"] for pred in predes) 
+    # stage_output_bs = sum(current_graph[local_rank][succ]["micro_batch_size"] for succ in succs) if len(succs) > 0 else args.micro_batch_size
+
+    # print(f"rank={local_rank} | stage_input/output_bs={stage_input_bs},{stage_output_bs} | real_mbs={args.real_micro_batch_size}", flush=True)
+
+    input_batch_size = args.real_micro_batch_size
+    output_batch_size = args.real_micro_batch_size
 
     recv_tensor_shapes = get_tensor_shapes(
         rank=rank - 1,
         model_type=model_type,
         seq_length=seq_length,
-        micro_batch_size=stage_input_bs,
+        micro_batch_size=input_batch_size,
         decoder_seq_length=decoder_seq_length,
         config=config,
     )
@@ -1288,7 +1293,7 @@ def forward_backward_pipelining_without_interleaving(
         rank=rank,
         model_type=model_type,
         seq_length=seq_length,
-        micro_batch_size=stage_output_bs,
+        micro_batch_size=output_batch_size,
         decoder_seq_length=decoder_seq_length,
         config=config,
     )

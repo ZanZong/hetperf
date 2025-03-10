@@ -99,6 +99,7 @@ def get_batch(data_iterator):
     labels = tokens_[:, 1:].contiguous()
     tokens = tokens_[:, :-1].contiguous()
 
+    # TODO
     if parallel_state.is_pipeline_first_stage():
         first_stage_devices = args.pipe_stage_device[parallel_state.get_pipeline_model_parallel_group_id()][0]
         shard_index = first_stage_devices.index(torch.distributed.get_rank())

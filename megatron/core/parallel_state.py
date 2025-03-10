@@ -7,6 +7,7 @@ from typing import Optional
 
 import torch
 import networkx as nx
+import torch.distributed
 
 from .utils import GlobalMemoryBuffer
 from megatron import get_args
@@ -50,7 +51,7 @@ _EMBEDDING_GLOBAL_RANKS = None
 # A list of ranks that have a copy of the position embedding.
 _POSITION_EMBEDDING_GLOBAL_RANKS = None
 
-# A list of global ranks for each tensor model group
+# A list of ranks for current tensor model group
 _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = None
 
 # A list of global ranks for each pipeline group to ease calculation of the source
@@ -81,6 +82,12 @@ _GLOBAL_MEMORY_BUFFER = None
 # The device type of all ordered ranks.
 _HETERO_DEVICE_TYPES = None
 
+# List of predecessor/successor nodes in pipeline parallel send/recv communication
+# each element as (node_id, micro_batch_size)
+_SEND_SUCC_NODES = None
+_RECV_PRED_NODES = None
+_SEND_PRED_NODES = None
+_RECV_SUCC_NODES = None
 
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
@@ -202,8 +209,8 @@ def initialize_model_parallel(
 
         depth = {node: 0 for node in devices}
         for node in nx.topological_sort(g):
-            if node < 0:
-                break
+            # if node < 0:
+            #     break
             for succ in g.successors(node):
                 depth[succ] = max(depth[succ], depth[node] + 1)
         # virtual node and edge for input data
@@ -229,9 +236,10 @@ def initialize_model_parallel(
     args.pipe_stage_device = pipe_stage_device
     print(f"args.pipe_depth={args.pipe_depth}\n\n", flush=True)
     args.pipe_graph = pipe_graph
-    for graph, depth in zip(args.pipe_graph, args.pipe_depth):
-        set_micro_batch_dp_dispatcher(graph, depth, args.micro_batch_size)
-        # set_micro_batch_dp_dispatcher(graph, depth, args.micro_batch_size)
+    for graph in args.pipe_graph:
+        new_mbs = set_micro_batch_dp_dispatcher(graph, args.micro_batch_size)
+        if new_mbs is not None:
+            args.real_micro_batch_size = new_mbs
     init_group_from_config = True
     
     global _DATA_PARALLEL_GROUP
@@ -248,7 +256,6 @@ def initialize_model_parallel(
     global _MODEL_PARALLEL_GROUP
     global _PIPELINE_MODEL_PARALLEL_GROUP
     global _PIPELINE_GLOBAL_RANKS
-    global _PIPELINE_GROUP_ID
     global _EMBEDDING_GROUP
     global _EMBEDDING_GLOBAL_RANKS
     global _POSITION_EMBEDDING_GROUP
@@ -258,6 +265,7 @@ def initialize_model_parallel(
     global _TENSOR_AND_EXPERT_PARALLEL_GROUP
     global _DATA_MODULO_EXPERT_PARALLEL_GROUP
     if init_group_from_config:
+        global _PIPELINE_GROUP_ID
         if virtual_pipeline_model_parallel_size is not None:
             raise RuntimeError("virtual pipeline model paralllel is to be supported.")
         num_tensor_model_parallel_groups = len(parallel_groups["tp"])
@@ -299,7 +307,9 @@ def initialize_model_parallel(
             if rank in ranks:
                 _TENSOR_MODEL_PARALLEL_GROUP = group
                 _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = ranks
+                args.tensor_model_parallel_size = len(ranks)
         
+        assert _TENSOR_MODEL_PARALLEL_GROUP is not None, 'tensor model parallel group is not initialized'
         # Build the model-parallel groups. TODO: corner case
         _MODEL_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
         
@@ -314,11 +324,14 @@ def initialize_model_parallel(
         for ranks in parallel_groups["pp"]:
             group = torch.distributed.new_group(ranks)
             if rank in ranks:
+                assert _PIPELINE_MODEL_PARALLEL_GROUP is None, 'pipeline model parallel group is initialized twice'
                 _PIPELINE_MODEL_PARALLEL_GROUP = group
                 _PIPELINE_GLOBAL_RANKS = ranks
+                rep_rank = _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
                 for index, pipe in enumerate(args.pipe_depth):
-                    if _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0] in pipe.keys():
+                    if rep_rank in pipe.keys():
                         _PIPELINE_GROUP_ID = index
+                        set_pred_and_succ_nodes(args.pipe_graph[index], rep_rank, rank)
                         break
                 assert _PIPELINE_GROUP_ID is not None, 'pipeline group id not found'
             # Setup embedding group (to exchange gradients between
@@ -679,41 +692,146 @@ def initialize_model_parallel(
     # print(f"localrank={rank}, pipeline global ranks={get_pipeline_model_parallel_rank()}, prev rank={get_pipeline_model_parallel_prev_rank()}, next rank={get_pipeline_model_parallel_next_rank()}, first rank={get_pipeline_model_parallel_first_rank()}, last rank={get_pipeline_model_parallel_last_rank()}, is first stage={is_pipeline_first_stage()}, is last stage={is_pipeline_last_stage()}", flush=True)
 
 
-def set_micro_batch_dp_dispatcher(graph: nx.DiGraph, graph_depth: dict, micro_batch_size: int):
-    """For the given graph and the number of micro-batches, determine the flow of micro-batch data for stages."""
-    stages = sorted(list(set(graph_depth.values())))
-    stage_device_list = []
-    for stage in stages:
-        ranks = []
-        for node in sorted(graph_depth.keys()):
-            if graph_depth[node] == stage:
-                ranks.append(node)
-        stage_device_list.append(ranks)
-    # Mode 1: uniform sharding
-    per_device_micro_batch_sizes = {}
-    for stage, ranks in enumerate(stage_device_list):
-        if micro_batch_size % len(ranks) == 0:
-            per_device_micro_batch_sizes[stage] = {d: micro_batch_size // len(ranks) for d in ranks}
-        else:            
-            rounded_bs = int(micro_batch_size // len(ranks))
-            per_device_micro_batch_sizes[stage] = {d: rounded_bs for d in ranks[:-1]}
-            per_device_micro_batch_sizes[stage][ranks[-1]] = micro_batch_size - (len(ranks) - 1) * rounded_bs
+def set_micro_batch_dp_dispatcher(graph: nx.DiGraph, micro_batch_size: int):
+    """Determine the flow of micro-batch data for the given graph and number of micro-batches."""
+    total_mbs = {node: 0 for node in graph.nodes}
+    assert -1 in total_mbs.keys(), 'Guard node -1 not exist'
+    total_mbs[-1] = micro_batch_size
+    for node in nx.topological_sort(graph):
+        succ_nodes = list(graph.successors(node))
+        num_successors = len(succ_nodes)
+        if num_successors == 0:
+            continue
+        assert total_mbs[node] > num_successors, 'micro_batch_size < num_successors, invalid pipeline diagram'
+        base_mbs = total_mbs[node] // num_successors
+        remain_mbs = total_mbs[node] % num_successors
+        for index, succ in enumerate(succ_nodes):
+            edge_mbs = base_mbs + 1 if index < remain_mbs else base_mbs
+            graph[node][succ]['micro_batch_size'] = edge_mbs
+            total_mbs[succ] += edge_mbs
+    rank = torch.distributed.get_rank()
+    return total_mbs[rank] if graph.has_node(rank) else None
     
-    # TODO Mode 2: manual sharding
-    # Set micro-batch numbers to edge weights
-    for stage in per_device_micro_batch_sizes.keys():
-        for rank, input_bs in per_device_micro_batch_sizes[stage].items():
-            predes = [pred for pred in graph.predecessors(rank)]
-            for i, pred in enumerate(predes):
-                if input_bs % len(predes) == 0:
-                    print(f"update rank={rank}, pred={pred}, weight = {input_bs // len(predes)}", flush=True)
-                    graph[pred][rank]['weight'] = input_bs // len(predes)
-                else:
-                    rounded_bs = int(input_bs // len(predes))
-                    if i != len(predes) - 1:
-                        graph[pred][rank]['weight'] = rounded_bs
-                    else:
-                        graph[pred][rank]['weight'] = input_bs - (len(predes) - 1) * rounded_bs
+    # stages = sorted(list(set(graph_depth.values())))
+    # stage_device_list = []
+    # for stage in stages:
+    #     ranks = []
+    #     for node in sorted(graph_depth.keys()):
+    #         if graph_depth[node] == stage:
+    #             ranks.append(node)
+    #     stage_device_list.append(ranks)
+    # # Mode 1: uniform sharding
+    # per_device_micro_batch_sizes = {}
+    # for stage, ranks in enumerate(stage_device_list):
+    #     if micro_batch_size % len(ranks) == 0:
+    #         per_device_micro_batch_sizes[stage] = {d: micro_batch_size // len(ranks) for d in ranks}
+    #     else:            
+    #         rounded_bs = int(micro_batch_size // len(ranks))
+    #         per_device_micro_batch_sizes[stage] = {d: rounded_bs for d in ranks[:-1]}
+    #         per_device_micro_batch_sizes[stage][ranks[-1]] = micro_batch_size - (len(ranks) - 1) * rounded_bs
+    
+    # # TODO Mode 2: manual sharding
+    # # Set micro-batch numbers to edge weights
+    # for stage in per_device_micro_batch_sizes.keys():
+    #     for rank, input_bs in per_device_micro_batch_sizes[stage].items():
+    #         predes = [pred for pred in graph.predecessors(rank)]
+    #         for i, pred in enumerate(predes):
+    #             if input_bs % len(predes) == 0:
+    #                 print(f"update rank={rank}, pred={pred}, weight = {input_bs // len(predes)}", flush=True)
+    #                 graph[pred][rank]['weight'] = input_bs // len(predes)
+    #             else:
+    #                 rounded_bs = int(input_bs // len(predes))
+    #                 if i != len(predes) - 1:
+    #                     graph[pred][rank]['weight'] = rounded_bs
+    #                 else:
+    #                     graph[pred][rank]['weight'] = input_bs - (len(predes) - 1) * rounded_bs
+
+def set_pred_and_succ_nodes(graph: nx.DiGraph, rep_node: int, cur_node: int):
+    """
+        Determine the predecessor and successor nodes for communication 
+        based on the given graph, current node, and representative node.
+    """
+    global _SEND_SUCC_NODES
+    global _RECV_PRED_NODES
+    global _SEND_PRED_NODES
+    global _RECV_SUCC_NODES
+    cur_tp_group_ranks = _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS
+    cur_tp_group_size = len(cur_tp_group_ranks)
+    assert cur_node in cur_tp_group_ranks, f'current node {cur_node} not in TP group'
+    cur_tp_rank = cur_tp_group_ranks.index(cur_node)
+    assert cur_tp_group_size > 0, 'current TP group is empty'
+    recv_pred_nodes = []
+    send_pred_nodes = []
+    for node in graph.predecessors(rep_node):
+        if node == -1:
+            continue
+        pred_tp_group_ranks = graph.nodes[node]["tp_group"]
+        pred_tp_group_size = len(pred_tp_group_ranks)
+        assert pred_tp_group_size > 0, 'predecessor TP group is empty'
+        micro_batch_size = graph[node][rep_node]['micro_batch_size']
+        # forward (recv pred)
+        if pred_tp_group_size < cur_tp_group_size:
+            base = cur_tp_group_size // pred_tp_group_size
+            remainder = cur_tp_group_size % pred_tp_group_size
+            if cur_tp_rank < remainder * (base + 1):
+                pred_tp_rank = cur_tp_rank // (base + 1)
+            else:
+                pred_tp_rank = remainder + (cur_tp_rank - remainder * (base + 1)) // base
+        else:
+            pred_tp_rank = cur_tp_rank
+        recv_pred_nodes.append((pred_tp_group_ranks[pred_tp_rank], micro_batch_size))
+        # backward (send pred)
+        if cur_tp_group_size < pred_tp_group_size:
+            base = pred_tp_group_size // cur_tp_group_size
+            remainder = pred_tp_group_size % cur_tp_group_size
+            if cur_tp_rank < remainder:
+                begin_index = cur_tp_rank * (base + 1)
+                end_index = begin_index + (base + 1)
+            else:
+                begin_index = cur_tp_rank * base + remainder
+                end_index = begin_index + base
+            send_pred_nodes.extend([(pred_tp_group_ranks[index], micro_batch_size) for index in range(begin_index, end_index)])
+        else:
+            if cur_tp_rank < pred_tp_group_size:
+                send_pred_nodes.append((pred_tp_group_ranks[cur_tp_rank], micro_batch_size))
+    send_succ_nodes = []
+    recv_succ_nodes = []
+    for node in graph.successors(rep_node):
+        succ_tp_group_ranks = graph.nodes[node]['tp_group']
+        succ_tp_group_size = len(succ_tp_group_ranks)
+        assert succ_tp_group_size > 0, 'successor TP group is empty'
+        micro_batch_size = graph[rep_node][node]['micro_batch_size']
+        # forward (send succ)
+        if cur_tp_group_size < succ_tp_group_size:
+            base = succ_tp_group_size // cur_tp_group_size
+            remainder = succ_tp_group_size % cur_tp_group_size
+            if cur_tp_rank < remainder:
+                begin_index = cur_tp_rank * (base + 1)
+                end_index = begin_index + (base + 1)
+            else:
+                begin_index = cur_tp_rank * base + remainder
+                end_index = begin_index + base
+            send_succ_nodes.extend([(succ_tp_group_ranks[index], micro_batch_size) for index in range(begin_index, end_index)])
+        else:
+            if cur_tp_rank < succ_tp_group_size:
+                send_succ_nodes.append((succ_tp_group_ranks[cur_tp_rank], micro_batch_size))
+        # backward (recv succ)
+        if succ_tp_group_size < cur_tp_group_size:
+            base = cur_tp_group_size // succ_tp_group_size
+            remainder = cur_tp_group_size % succ_tp_group_size
+            if cur_tp_rank < remainder * (base + 1):
+                succ_tp_rank = cur_tp_rank // (base + 1)
+            else:
+                succ_tp_rank = remainder + (cur_tp_rank - remainder * (base + 1)) // base
+        else:
+            succ_tp_rank = cur_tp_rank
+        recv_succ_nodes.append((succ_tp_group_ranks[succ_tp_rank], micro_batch_size))
+
+    _SEND_SUCC_NODES = send_succ_nodes
+    _RECV_PRED_NODES = recv_pred_nodes
+    _SEND_PRED_NODES = send_pred_nodes
+    _RECV_SUCC_NODES = recv_succ_nodes
+    print(f"rank:{cur_node} | r_p{recv_pred_nodes}, s_s{send_succ_nodes}, r_s{recv_succ_nodes}, s_p{send_pred_nodes}", flush=True)
 
 
 def is_unitialized():
@@ -737,6 +855,25 @@ def get_model_parallel_group():
     assert _MODEL_PARALLEL_GROUP is not None, 'model parallel group is not initialized'
     return _MODEL_PARALLEL_GROUP
 
+def get_send_successor_ranks():
+    """Get a list of (rank, micro_batch_size) for successor nodes needs to be sent"""
+    assert _SEND_SUCC_NODES is not None, 'send successor nodes is not initialized'
+    return _SEND_SUCC_NODES
+
+def get_recv_successor_ranks():
+    """Get a list of (rank, micro_batch_size) for successor nodes needs to be received"""
+    assert _RECV_SUCC_NODES is not None, 'recv successor nodes is not initialized'
+    return _RECV_SUCC_NODES
+
+def get_send_predecessor_ranks():
+    """Get a list of (rank, micro_batch_size) for predecessor nodes needs to be sent"""
+    assert _SEND_PRED_NODES is not None, 'send predecessor nodes is not initialized'
+    return _SEND_PRED_NODES
+    
+def get_recv_predecessor_ranks():
+    """Get a list of (rank, micro_batch_size) for predecessor nodes needs to be received"""
+    assert _RECV_PRED_NODES is not None, 'recv predecessor nodes is not initialized'
+    return _RECV_PRED_NODES
 
 def get_tensor_model_parallel_group(check_initialized=True):
     """Get the tensor model parallel group the caller rank belongs to."""
@@ -926,11 +1063,12 @@ def get_pipeline_model_parallel_rank():
     """Return my rank for the pipeline model parallel group."""
     global _MPU_PIPELINE_MODEL_PARALLEL_RANK
     if _PIPELINE_GROUP_ID is not None:
-        if _MPU_PIPELINE_MODEL_PARALLEL_RANK is None:
-            args = get_args()
-            rank = torch.distributed.get_rank()
-            _MPU_PIPELINE_MODEL_PARALLEL_RANK = args.pipe_depth[_PIPELINE_GROUP_ID][rank]
-        return _MPU_PIPELINE_MODEL_PARALLEL_RANK
+        if _MPU_PIPELINE_MODEL_PARALLEL_RANK is not None:
+            return _MPU_PIPELINE_MODEL_PARALLEL_RANK
+        args = get_args()
+        rep_rank = _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+        assert rep_rank in args.pipe_depth[_PIPELINE_GROUP_ID], f'{rep_rank} not in pipe {args.pipe_depth[_PIPELINE_GROUP_ID]}'
+        return args.pipe_depth[_PIPELINE_GROUP_ID][rep_rank]
     else:
         if _MPU_PIPELINE_MODEL_PARALLEL_RANK is not None:
             return _MPU_PIPELINE_MODEL_PARALLEL_RANK
@@ -1086,9 +1224,9 @@ def get_pipeline_model_parallel_last_rank():
     """Return the global rank of the last process in the pipeline for the
     current tensor parallel group"""
     if _PIPELINE_GROUP_ID is not None:
-        last_rank_local = get_pipeline_model_parallel_world_size() - 1
+        max_depth = get_pipeline_model_parallel_world_size() - 1
         args = get_args()
-        ranks = [k for k, v in args.pipe_depth[_PIPELINE_GROUP_ID] if v == last_rank_local]
+        ranks = [rank for rank, depth in args.pipe_depth[_PIPELINE_GROUP_ID] if depth == max_depth]
         return ranks[0] if len(ranks) == 1 else ranks
     else:
         assert _PIPELINE_GLOBAL_RANKS is not None, "Pipeline parallel group is not initialized"

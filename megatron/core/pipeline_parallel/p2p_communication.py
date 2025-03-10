@@ -15,6 +15,10 @@ from megatron.core.parallel_state import (
     get_pipeline_model_parallel_prev_rank,
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_group_id,
+    get_send_successor_ranks,
+    get_recv_predecessor_ranks,
+    get_send_predecessor_ranks,
+    get_recv_successor_ranks
 )
 
 # Types
@@ -128,16 +132,13 @@ def _batched_p2p_ops(
     group: torch.distributed.ProcessGroup
 ):
     ops = []
-    args = get_args()
-    g = args.pipe_graph[get_pipeline_model_parallel_group_id()]
-    local_rank = torch.distributed.get_rank()
-    preds = [pred for pred in g.predecessors(local_rank)]
-    succs = [succ for succ in g.successors(local_rank)]
-    # print(f"local rank={torch.distributed.get_rank()}, _batched_p2p_ops preds num={len(preds)}, succs num={len(succs)}", flush=True)
     if tensor_send_prev is not None:
         # Shard the tensor along the "batch" dimension
-        sharded_tensors = torch.chunk(tensor_send_prev, len(preds), dim=1)
-        for i, pred in enumerate(preds):
+        send_prev_ranks = get_send_predecessor_ranks()
+        send_prev_nodes = [item[0] for item in send_prev_ranks]
+        send_prev_sizes = [item[1] for item in send_prev_ranks]
+        sharded_tensors = torch.split(tensor_send_prev, send_prev_sizes, dim=1)
+        for i, pred in enumerate(send_prev_nodes):
             send_prev_op = torch.distributed.P2POp(
                 torch.distributed.isend,
                 sharded_tensors[i].contiguous(),
@@ -147,8 +148,11 @@ def _batched_p2p_ops(
             # print(f"local rank={torch.distributed.get_rank()}, send prev={pred}", flush=True)
             ops.append(send_prev_op)
     if tensor_recv_prev is not None:
-        sharded_tensors = torch.chunk(tensor_recv_prev, len(preds), dim=1)
-        for i, pred in enumerate(preds):
+        recv_prev_ranks = get_recv_predecessor_ranks()
+        recv_prev_nodes = [item[0] for item in recv_prev_ranks]
+        recv_prev_sizes = [item[1] for item in recv_prev_ranks]
+        sharded_tensors = torch.split(tensor_recv_prev, recv_prev_sizes, dim=1)
+        for i, pred in enumerate(recv_prev_nodes):
             recv_prev_op = torch.distributed.P2POp(
                 torch.distributed.irecv,
                 sharded_tensors[i].contiguous(),
@@ -158,8 +162,11 @@ def _batched_p2p_ops(
             # print(f"local rank={torch.distributed.get_rank()}, recv prev={pred}", flush=True)
             ops.append(recv_prev_op)
     if tensor_send_next is not None:
-        sharded_tensors = torch.chunk(tensor_send_next, len(succs), dim=1)
-        for i, succ in enumerate(succs):
+        send_succ_ranks = get_send_successor_ranks()
+        send_succ_nodes = [item[0] for item in send_succ_ranks]
+        send_succ_sizes = [item[1] for item in send_succ_ranks]
+        sharded_tensors = torch.split(tensor_send_next, send_succ_sizes, dim=1)
+        for i, succ in enumerate(send_succ_nodes):
             send_next_op = torch.distributed.P2POp(
                 torch.distributed.isend,
                 sharded_tensors[i].contiguous(),
@@ -169,8 +176,11 @@ def _batched_p2p_ops(
             # print(f"local rank={torch.distributed.get_rank()}, send next={succ}", flush=True)
             ops.append(send_next_op)
     if tensor_recv_next is not None:
-        sharded_tensors = torch.chunk(tensor_recv_next, len(succs), dim=1)
-        for i, succ in enumerate(succs):
+        recv_succ_ranks = get_recv_successor_ranks()
+        recv_succ_nodes = [item[0] for item in recv_succ_ranks]
+        recv_succ_sizes = [item[1] for item in recv_succ_ranks]
+        sharded_tensors = torch.split(tensor_recv_next, recv_succ_sizes, dim=1)
+        for i, succ in enumerate(recv_succ_nodes):
             recv_next_op = torch.distributed.P2POp(
                 torch.distributed.irecv,
                 sharded_tensors[i].contiguous(),

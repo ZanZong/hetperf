@@ -1,0 +1,17 @@
+{
+    "global_batch_size": 64,
+    "micro_batch_size": 8,
+    "data_parallel_size": 1,
+    "tensor_parallel_size": [1, 2, 2, 2, 2],
+    "pipeline_parallel_size": 3,
+    "stage_layer_num": [12, 6, 6],
+    "parallel_groups": {
+        "tp": [[0], [1, 2], [3, 4]],
+        "cp": [[0], [1], [2], [3], [4]],
+        "dp": [[0], [1], [2], [3], [4]],
+        "pp": [[0, 1, 2, 3, 4]]
+    },
+    "pipe_deps": {
+        "0": [[0, 1], [1, 3]]
+    }
+}

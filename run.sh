@@ -32,7 +32,7 @@ export MODEL_NAME="GPT-1.3B"
 export GLOBAL_BATCH_SIZE=64
 export MICRO_BATCH_SIZE=8
 export NODELIST=octave,ja[1-4]
-export WORLD_SIZE=8
+export WORLD_SIZE=5
 
 export NUM_LAYERS=-1
 export HIDDEN_SIZE=-1
@@ -102,8 +102,8 @@ srun \
     -N 1 \
     -w octave \
     --job-name=$EXP_NAME \
-	--ntasks-per-node=4 \
-    --gres=gpu:a100:4 \
+	--ntasks-per-node=1 \
+    --gres=gpu:a100:1 \
     --export=ALL \
     bash pretrain.sh : \
     -A public \
