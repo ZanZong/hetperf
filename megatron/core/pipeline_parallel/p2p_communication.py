@@ -5,6 +5,7 @@ from functools import reduce
 from typing import Callable, List, Optional, Tuple, Union
 
 import torch
+import torch.distributed
 
 from megatron import core
 from megatron import get_args
@@ -135,22 +136,24 @@ def _batched_p2p_ops(
     if tensor_send_prev is not None:
         # Shard the tensor along the "batch" dimension
         send_prev_ranks = get_send_predecessor_ranks()
-        send_prev_nodes = [item[0] for item in send_prev_ranks]
-        send_prev_sizes = [item[1] for item in send_prev_ranks]
-        sharded_tensors = torch.split(tensor_send_prev, send_prev_sizes, dim=1)
-        for i, pred in enumerate(send_prev_nodes):
-            send_prev_op = torch.distributed.P2POp(
-                torch.distributed.isend,
-                sharded_tensors[i].contiguous(),
-                pred,
-                group,
-            )
-            # print(f"local rank={torch.distributed.get_rank()}, send prev={pred}", flush=True)
-            ops.append(send_prev_op)
+        if len(send_prev_ranks) > 0:
+            send_prev_sizes = [item[0] for item in send_prev_ranks]
+            send_prev_nodes = [item[1] for item in send_prev_ranks]
+            sharded_tensors = torch.split(tensor_send_prev, send_prev_sizes, dim=1)
+            for i, preds_in_same_tp_group in enumerate(send_prev_nodes):
+                for pred in preds_in_same_tp_group:
+                    send_prev_op = torch.distributed.P2POp(
+                        torch.distributed.isend,
+                        sharded_tensors[i].contiguous(),
+                        pred,
+                        group,
+                    )
+                    ops.append(send_prev_op)
+                # print(f"local rank={torch.distributed.get_rank()}, send prev={pred}", flush=True)
     if tensor_recv_prev is not None:
         recv_prev_ranks = get_recv_predecessor_ranks()
-        recv_prev_nodes = [item[0] for item in recv_prev_ranks]
-        recv_prev_sizes = [item[1] for item in recv_prev_ranks]
+        recv_prev_sizes = [item[0] for item in recv_prev_ranks]
+        recv_prev_nodes = [item[1] for item in recv_prev_ranks]
         sharded_tensors = torch.split(tensor_recv_prev, recv_prev_sizes, dim=1)
         for i, pred in enumerate(recv_prev_nodes):
             recv_prev_op = torch.distributed.P2POp(
@@ -159,26 +162,28 @@ def _batched_p2p_ops(
                 pred,
                 group,
             )
-            # print(f"local rank={torch.distributed.get_rank()}, recv prev={pred}", flush=True)
             ops.append(recv_prev_op)
+            # print(f"local rank={torch.distributed.get_rank()}, recv prev={pred}", flush=True)
     if tensor_send_next is not None:
         send_succ_ranks = get_send_successor_ranks()
-        send_succ_nodes = [item[0] for item in send_succ_ranks]
-        send_succ_sizes = [item[1] for item in send_succ_ranks]
-        sharded_tensors = torch.split(tensor_send_next, send_succ_sizes, dim=1)
-        for i, succ in enumerate(send_succ_nodes):
-            send_next_op = torch.distributed.P2POp(
-                torch.distributed.isend,
-                sharded_tensors[i].contiguous(),
-                succ,
-                group,
-            )
-            # print(f"local rank={torch.distributed.get_rank()}, send next={succ}", flush=True)
-            ops.append(send_next_op)
+        if len(send_succ_ranks) > 0:
+            send_succ_sizes = [item[0] for item in send_succ_ranks]
+            send_succ_nodes = [item[1] for item in send_succ_ranks]
+            sharded_tensors = torch.split(tensor_send_next, send_succ_sizes, dim=1)
+            for i, succs_in_same_tp_group in enumerate(send_succ_nodes):
+                for succ in succs_in_same_tp_group:
+                    send_next_op = torch.distributed.P2POp(
+                        torch.distributed.isend,
+                        sharded_tensors[i].contiguous(),
+                        succ,
+                        group,
+                    )
+                    ops.append(send_next_op)
+                # print(f"local rank={torch.distributed.get_rank()}, send next={succ}", flush=True)
     if tensor_recv_next is not None:
         recv_succ_ranks = get_recv_successor_ranks()
-        recv_succ_nodes = [item[0] for item in recv_succ_ranks]
-        recv_succ_sizes = [item[1] for item in recv_succ_ranks]
+        recv_succ_sizes = [item[0] for item in recv_succ_ranks]
+        recv_succ_nodes = [item[1] for item in recv_succ_ranks]
         sharded_tensors = torch.split(tensor_recv_next, recv_succ_sizes, dim=1)
         for i, succ in enumerate(recv_succ_nodes):
             recv_next_op = torch.distributed.P2POp(
@@ -187,8 +192,8 @@ def _batched_p2p_ops(
                 succ,
                 group,
             )
-            # print(f"local rank={torch.distributed.get_rank()}, recv next={succ}", flush=True)
             ops.append(recv_next_op)
+            # print(f"local rank={torch.distributed.get_rank()}, recv next={succ}", flush=True)
         # print(f"recvd tensor={tensor_recv_next}")
     if len(ops) > 0:
         reqs = torch.distributed.batch_isend_irecv(ops)

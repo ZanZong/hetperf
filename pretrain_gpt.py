@@ -99,34 +99,27 @@ def get_batch(data_iterator):
     labels = tokens_[:, 1:].contiguous()
     tokens = tokens_[:, :-1].contiguous()
 
-    # TODO
     if parallel_state.is_pipeline_first_stage():
-        first_stage_devices = args.pipe_stage_device[parallel_state.get_pipeline_model_parallel_group_id()][0]
-        shard_index = first_stage_devices.index(torch.distributed.get_rank())
-        shard_num = len(first_stage_devices)
-        shard_index = shard_index
-        if shard_num > 1:
-            sharded_tokens = torch.chunk(tokens, shard_num, dim=0)
+        rep_rank = parallel_state._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+        shard_index = parallel_state._PIPELINE_FIRST_STAGE_RANKS.index(rep_rank)
+        shard_sizes = parallel_state._PIPELINE_FIRST_STAGE_MICRO_BATCH_SIZES
+        if len(shard_sizes) > 1:
+            sharded_tokens = torch.split(tokens, shard_sizes, dim=0)
             tokens = sharded_tokens[shard_index]
-            sharded_labels = torch.chunk(labels, shard_num, dim=0)
+            sharded_labels = torch.split(labels, shard_sizes, dim=0)
             labels = sharded_labels[shard_index]
             print(f"First stage, after sharded tokens shape={tokens.shape}, labels shape={labels.shape}", flush=True)
 
     if parallel_state.is_pipeline_last_stage():
         # shard data according to dependency
-        last_stage_devices = args.pipe_stage_device[parallel_state.get_pipeline_model_parallel_group_id()][-1]
-        # g = args.pipe_graph[parallel_state.get_pipeline_model_parallel_group_id()]
-        # pred = [pred for pred in g.predecessors(torch.distributed.get_rank())][0]
-        # shard_ranks = [_ for _ in g.successors(pred)]
-        shard_index = last_stage_devices.index(torch.distributed.get_rank())
-        # sharded_batch_size = g[pred][torch.distributed.get_rank()]["weight"]
-        shard_num = len(last_stage_devices)
-        shard_index = shard_index
-        print(f"get_batch tokens shape={tokens.shape}, labels shape={labels.shape}, shard num={shard_num}", flush=True)
-        if shard_num > 1:
-            sharded_tokens = torch.chunk(tokens, shard_num, dim=0)
+        rep_rank = parallel_state._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+        shard_index = parallel_state._PIPELINE_LAST_STAGE_RANKS.index(rep_rank)
+        shard_sizes = parallel_state._PIPELINE_LAST_STAGE_MICRO_BATCH_SIZES
+        print(f"get_batch tokens shape={tokens.shape}, labels shape={labels.shape}, shard sizes={shard_sizes}", flush=True)
+        if len(shard_sizes) > 1:
+            sharded_tokens = torch.split(tokens, shard_sizes, dim=0)
             tokens = sharded_tokens[shard_index]
-            sharded_labels = torch.chunk(labels, shard_num, dim=0)
+            sharded_labels = torch.split(labels, shard_sizes, dim=0)
             labels = sharded_labels[shard_index]
             print(f"Last stage, after sharded tokens shape={tokens.shape}, labels shape={labels.shape}", flush=True)
     

@@ -2,6 +2,7 @@
 
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+import torch.distributed
 
 from megatron.core import mpu
 from megatron.core.utils import get_attr_wrapped_model, get_model_config
@@ -60,8 +61,10 @@ def _allreduce_position_embedding_grads(model, config):
 
 def _allreduce_embedding_grads(model, config):
     """All-reduce both word and position embeddings."""
-    _allreduce_word_embedding_grads(model, config)
-    _allreduce_position_embedding_grads(model, config)
+    rank = torch.distributed.get_rank()
+    # _allreduce_word_embedding_grads(model, config)
+    print(f"rank:{rank} | done word_embedding all-reduce")
+    # _allreduce_position_embedding_grads(model, config)
 
 
 def _allreduce_layernorm_grads(model, config):
@@ -107,6 +110,7 @@ def finalize_model_grads(model):
     for sequence parallelism, and embedding grads across first and
     last pipeline stages (if not tied)."""
 
+    rank = torch.distributed.get_rank()
     config = get_model_config(model[0])
 
     # All-reduce / reduce-scatter across DP replicas.
@@ -116,6 +120,7 @@ def finalize_model_grads(model):
         model_chunk.sync_gradients()
     if config.timers is not None:
         config.timers('all-grads-sync').stop()
+    print(f"rank:{rank} | done DP all-reduce")
 
     # All-reduce layer-norm grads (for sequence parallelism).
     if config.timers is not None:
@@ -125,6 +130,7 @@ def finalize_model_grads(model):
     _allreduce_layernorm_grads(model, config)
     if config.timers is not None:
         config.timers('layernorm-grads-all-reduce').stop()
+    print(f"rank:{rank} | done layer-norm all-reduce")
 
     # All-reduce embedding grads.
     if config.timers is not None:
@@ -134,6 +140,7 @@ def finalize_model_grads(model):
     _allreduce_embedding_grads(model, config)
     if config.timers is not None:
         config.timers('embedding-grads-all-reduce').stop()
+    print(f"rank:{rank} | done embedding all-reduce")
 
     # All-reduce expert grads (for expert parallelism).
     if config.timers is not None:
@@ -143,3 +150,4 @@ def finalize_model_grads(model):
     _allreduce_expert_grads(model, config)
     if config.timers is not None:
         config.timers('expert-grads-all-reduce').stop()
+    print(f"rank:{rank} | done expert all-reduce")

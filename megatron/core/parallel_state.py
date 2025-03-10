@@ -16,6 +16,7 @@ from megatron import get_args
 _TENSOR_MODEL_PARALLEL_GROUP = None
 # Inter-layer model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
+_PIPELINE_MODEL_PARALLEL_REP_GROUP = None
 # Group ID of the current node's pipeline.
 _PIPELINE_GROUP_ID = None
 # Model parallel group (both intra- and pipeline) that the current rank belongs to.
@@ -82,11 +83,21 @@ _GLOBAL_MEMORY_BUFFER = None
 # The device type of all ordered ranks.
 _HETERO_DEVICE_TYPES = None
 
-# List of predecessor/successor nodes in pipeline parallel send/recv communication
-# each element as (node_id, micro_batch_size)
+# List of ranks in current pipeline first/last stage (sorted by ranks)
+_PIPELINE_FIRST_STAGE_RANKS = None
+_PIPELINE_LAST_STAGE_RANKS = None
+# List of micro batch sizes of first/last stage (sorted by ranks)
+_PIPELINE_FIRST_STAGE_MICRO_BATCH_SIZES = None
+_PIPELINE_LAST_STAGE_MICRO_BATCH_SIZES = None
+
+# List of predecessor/successor nodes in pipeline parallel send communication
+# each element as (micro_batch_size, [node0, node1, ...])
 _SEND_SUCC_NODES = None
-_RECV_PRED_NODES = None
 _SEND_PRED_NODES = None
+
+# List of predecessor/successor nodes in pipeline parallel recv communication
+# each element as (micro_batch_size, node)
+_RECV_PRED_NODES = None
 _RECV_SUCC_NODES = None
 
 def initialize_model_parallel(
@@ -220,26 +231,12 @@ def initialize_model_parallel(
                 g.add_edge(-1, node)
         pipe_graph.append(g)
         pipe_depth.append(depth)
-        
-        # Currently for pipeline + data parallel.
-        stages = sorted(list(set(depth.values())))
-        stage_device_list = []
-        for stage in stages:
-            ranks = []
-            for node in depth.keys():
-                if depth[node] == stage:
-                    ranks.extend(g.nodes[node]["tp_group"])
-            stage_device_list.append(ranks)
-        print(f'stage_device_list={stage_device_list}', flush=True)
-        pipe_stage_device.append(stage_device_list)
     args.pipe_depth = pipe_depth
-    args.pipe_stage_device = pipe_stage_device
+    args.rep_ranks = [ranks[0] for ranks in tp_groups] # fisrt rank of each tp group
     print(f"args.pipe_depth={args.pipe_depth}\n\n", flush=True)
     args.pipe_graph = pipe_graph
     for graph in args.pipe_graph:
-        new_mbs = set_micro_batch_dp_dispatcher(graph, args.micro_batch_size)
-        if new_mbs is not None:
-            args.real_micro_batch_size = new_mbs
+        set_micro_batch_dp_dispatcher(graph, args.micro_batch_size)
     init_group_from_config = True
     
     global _DATA_PARALLEL_GROUP
@@ -255,6 +252,7 @@ def initialize_model_parallel(
     global _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS
     global _MODEL_PARALLEL_GROUP
     global _PIPELINE_MODEL_PARALLEL_GROUP
+    global _PIPELINE_MODEL_PARALLEL_REP_GROUP
     global _PIPELINE_GLOBAL_RANKS
     global _EMBEDDING_GROUP
     global _EMBEDDING_GLOBAL_RANKS
@@ -336,6 +334,7 @@ def initialize_model_parallel(
                 assert _PIPELINE_GROUP_ID is not None, 'pipeline group id not found'
             # Setup embedding group (to exchange gradients between
             # first and last stages).
+            # TODO set right embedding/position_embedding group
             if len(ranks) > 1:
                 embedding_ranks = [ranks[0], ranks[-1]]
                 position_embedding_ranks = [ranks[0]]
@@ -363,7 +362,32 @@ def initialize_model_parallel(
                 _POSITION_EMBEDDING_GROUP = group
             if rank in ranks:
                 _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
+
+        pipeline_model_parallel_rep_group = torch.distributed.new_group(args.rep_ranks)
+        if rank in args.rep_ranks:
+            _PIPELINE_MODEL_PARALLEL_REP_GROUP = pipeline_model_parallel_rep_group
+
+        cur_pipe_graph = args.pipe_graph[_PIPELINE_GROUP_ID]
+        cur_pipe_depth = args.pipe_depth[_PIPELINE_GROUP_ID]
+        rep_rank = _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+        args.real_micro_batch_size = cur_pipe_graph.nodes[rep_rank]["micro_batch_size"]
+
+        global _PIPELINE_FIRST_STAGE_RANKS
+        global _PIPELINE_LAST_STAGE_RANKS
+        global _PIPELINE_FIRST_STAGE_MICRO_BATCH_SIZES
+        global _PIPELINE_LAST_STAGE_MICRO_BATCH_SIZES
+
+        _PIPELINE_FIRST_STAGE_RANKS = sorted([node for node in cur_pipe_graph.successors(-1)])
+        _PIPELINE_FIRST_STAGE_MICRO_BATCH_SIZES = \
+            [cur_pipe_graph.nodes[node]["micro_batch_size"] for node in _PIPELINE_FIRST_STAGE_RANKS]
         
+        max_depth = max(cur_pipe_depth.values())
+        _PIPELINE_LAST_STAGE_RANKS = sorted([node for node, depth in cur_pipe_depth.items() if depth == max_depth])
+        _PIPELINE_LAST_STAGE_MICRO_BATCH_SIZES = \
+            [cur_pipe_graph.nodes[node]["micro_batch_size"] for node in _PIPELINE_LAST_STAGE_RANKS]
+        
+        print(f"rank:{rank} | last_list {_PIPELINE_LAST_STAGE_RANKS} cur_pipe_depth {cur_pipe_depth}")
+
         # if isinstance(_PIPELINE_MODEL_PARALLEL_GROUP, list) and len(_PIPELINE_MODEL_PARALLEL_GROUP) == 1:
         #     _PIPELINE_MODEL_PARALLEL_GROUP = _PIPELINE_MODEL_PARALLEL_GROUP[0]
         #     _PIPELINE_GLOBAL_RANKS = _PIPELINE_GLOBAL_RANKS[0]
@@ -698,6 +722,7 @@ def set_micro_batch_dp_dispatcher(graph: nx.DiGraph, micro_batch_size: int):
     assert -1 in total_mbs.keys(), 'Guard node -1 not exist'
     total_mbs[-1] = micro_batch_size
     for node in nx.topological_sort(graph):
+        graph.nodes[node]["micro_batch_size"] = total_mbs[node]
         succ_nodes = list(graph.successors(node))
         num_successors = len(succ_nodes)
         if num_successors == 0:
@@ -709,8 +734,6 @@ def set_micro_batch_dp_dispatcher(graph: nx.DiGraph, micro_batch_size: int):
             edge_mbs = base_mbs + 1 if index < remain_mbs else base_mbs
             graph[node][succ]['micro_batch_size'] = edge_mbs
             total_mbs[succ] += edge_mbs
-    rank = torch.distributed.get_rank()
-    return total_mbs[rank] if graph.has_node(rank) else None
     
     # stages = sorted(list(set(graph_depth.values())))
     # stage_device_list = []
@@ -779,7 +802,7 @@ def set_pred_and_succ_nodes(graph: nx.DiGraph, rep_node: int, cur_node: int):
                 pred_tp_rank = remainder + (cur_tp_rank - remainder * (base + 1)) // base
         else:
             pred_tp_rank = cur_tp_rank
-        recv_pred_nodes.append((pred_tp_group_ranks[pred_tp_rank], micro_batch_size))
+        recv_pred_nodes.append((micro_batch_size, pred_tp_group_ranks[pred_tp_rank]))
         # backward (send pred)
         if cur_tp_group_size < pred_tp_group_size:
             base = pred_tp_group_size // cur_tp_group_size
@@ -790,10 +813,10 @@ def set_pred_and_succ_nodes(graph: nx.DiGraph, rep_node: int, cur_node: int):
             else:
                 begin_index = cur_tp_rank * base + remainder
                 end_index = begin_index + base
-            send_pred_nodes.extend([(pred_tp_group_ranks[index], micro_batch_size) for index in range(begin_index, end_index)])
+            send_pred_nodes.append((micro_batch_size, [pred_tp_group_ranks[index] for index in range(begin_index, end_index)]))
         else:
             if cur_tp_rank < pred_tp_group_size:
-                send_pred_nodes.append((pred_tp_group_ranks[cur_tp_rank], micro_batch_size))
+                send_pred_nodes.append((micro_batch_size, [pred_tp_group_ranks[cur_tp_rank]]))
     send_succ_nodes = []
     recv_succ_nodes = []
     for node in graph.successors(rep_node):
@@ -811,10 +834,10 @@ def set_pred_and_succ_nodes(graph: nx.DiGraph, rep_node: int, cur_node: int):
             else:
                 begin_index = cur_tp_rank * base + remainder
                 end_index = begin_index + base
-            send_succ_nodes.extend([(succ_tp_group_ranks[index], micro_batch_size) for index in range(begin_index, end_index)])
+            send_succ_nodes.append((micro_batch_size, [succ_tp_group_ranks[index] for index in range(begin_index, end_index)]))
         else:
             if cur_tp_rank < succ_tp_group_size:
-                send_succ_nodes.append((succ_tp_group_ranks[cur_tp_rank], micro_batch_size))
+                send_succ_nodes.append((micro_batch_size, [succ_tp_group_ranks[cur_tp_rank]]))
         # backward (recv succ)
         if succ_tp_group_size < cur_tp_group_size:
             base = cur_tp_group_size // succ_tp_group_size
@@ -825,7 +848,7 @@ def set_pred_and_succ_nodes(graph: nx.DiGraph, rep_node: int, cur_node: int):
                 succ_tp_rank = remainder + (cur_tp_rank - remainder * (base + 1)) // base
         else:
             succ_tp_rank = cur_tp_rank
-        recv_succ_nodes.append((succ_tp_group_ranks[succ_tp_rank], micro_batch_size))
+        recv_succ_nodes.append((micro_batch_size, succ_tp_group_ranks[succ_tp_rank]))
 
     _SEND_SUCC_NODES = send_succ_nodes
     _RECV_PRED_NODES = recv_pred_nodes
@@ -856,22 +879,22 @@ def get_model_parallel_group():
     return _MODEL_PARALLEL_GROUP
 
 def get_send_successor_ranks():
-    """Get a list of (rank, micro_batch_size) for successor nodes needs to be sent"""
+    """Get a list of (micro_batch_size, [rank0, rank1, ...]) for successor nodes needs to be sent"""
     assert _SEND_SUCC_NODES is not None, 'send successor nodes is not initialized'
     return _SEND_SUCC_NODES
 
-def get_recv_successor_ranks():
-    """Get a list of (rank, micro_batch_size) for successor nodes needs to be received"""
-    assert _RECV_SUCC_NODES is not None, 'recv successor nodes is not initialized'
-    return _RECV_SUCC_NODES
-
 def get_send_predecessor_ranks():
-    """Get a list of (rank, micro_batch_size) for predecessor nodes needs to be sent"""
+    """Get a list of (micro_batch_size, [rank0, rank1, ...]) for predecessor nodes needs to be sent"""
     assert _SEND_PRED_NODES is not None, 'send predecessor nodes is not initialized'
     return _SEND_PRED_NODES
+
+def get_recv_successor_ranks():
+    """Get a list of (micro_batch_size, rank) for successor nodes needs to be received"""
+    assert _RECV_SUCC_NODES is not None, 'recv successor nodes is not initialized'
+    return _RECV_SUCC_NODES
     
 def get_recv_predecessor_ranks():
-    """Get a list of (rank, micro_batch_size) for predecessor nodes needs to be received"""
+    """Get a list of (micro_batch_size, rank) for predecessor nodes needs to be received"""
     assert _RECV_PRED_NODES is not None, 'recv predecessor nodes is not initialized'
     return _RECV_PRED_NODES
 
@@ -891,6 +914,8 @@ def get_pipeline_model_parallel_group():
     ), 'pipeline_model parallel group is not initialized'
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
+def get_pipeline_model_parallel_rep_group():
+    return _PIPELINE_MODEL_PARALLEL_REP_GROUP
     
 def get_pipeline_model_parallel_group_id():
     """Get the pipeline model parallel group the caller rank belongs to."""
@@ -1089,9 +1114,7 @@ def is_pipeline_first_stage(ignore_virtual=False):
             and get_virtual_pipeline_model_parallel_rank() != 0
         ):
             return False
-    
-    rank = get_pipeline_model_parallel_rank()
-    return rank == 0
+    return get_pipeline_model_parallel_rank() == 0
 
 
 def is_pipeline_last_stage(ignore_virtual=False):

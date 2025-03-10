@@ -5,6 +5,7 @@ from typing import Callable, Iterator, List, Optional, Union
 import math
 import torch
 from torch.autograd.variable import Variable
+import torch.distributed
 
 from megatron import get_args
 from megatron.core import parallel_state
@@ -1317,7 +1318,7 @@ def forward_backward_pipelining_without_interleaving(
             )
         else:
             checkpoint_activations_microbatch = None
-        print(f"rank {local_rank} recv forward {i}", flush=True)
+        print(f"rank {local_rank} recv forward {i}, recv_shape {recv_tensor_shapes}", flush=True)
         input_tensor = recv_forward(recv_tensor_shapes, config)
         output_tensor = forward_step(
             forward_step_func,
@@ -1331,11 +1332,11 @@ def forward_backward_pipelining_without_interleaving(
             checkpoint_activations_microbatch,
         )
         # if torch.distributed.get_rank() == 0:
-        #     print(f"rank 0 stage output={output_tensor}, id={i}", flush=True)
+        #     print(f"rank 0 stage output_size={output_tensor[0].shape} {send_tensor_shapes}, id={i}", flush=True)
         # if torch.distributed.get_rank() == 1:
-        #     print(f"rank 1 stage output={output_tensor}, id={i}", flush=True)
+        #     print(f"rank 1 stage output_size={output_tensor[0].shape} {send_tensor_shapes}, id={i}", flush=True)
         send_forward(output_tensor, send_tensor_shapes, config)
-        print(f"rank {local_rank} send forward {i}", flush=True)
+        print(f"rank {local_rank} send forward {i}, send_shape {send_tensor_shapes}", flush=True)
         if not forward_only:
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)

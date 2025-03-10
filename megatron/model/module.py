@@ -100,20 +100,26 @@ class MegatronModule(torch.nn.Module):
 
         # Ensure that first and last stages have the same initial parameter
         # values.
-        if mpu.is_rank_in_embedding_group():
-            torch.distributed.all_reduce(self.shared_embedding_or_output_weight().data,
-                                         group=mpu.get_embedding_group())
-
+        # print(f"rank={torch.distributed.get_rank()}, mpu.is_rank_in_embedding_group()={mpu.is_rank_in_embedding_group()}", flush=True)
+        # if mpu.is_rank_in_embedding_group():
+        #     print(f"rank={torch.distributed.get_rank}, all-reduce shape={self.shared_embedding_or_output_weight().shape}", flush=True)
+        #     torch.distributed.all_reduce(self.shared_embedding_or_output_weight().data,
+        #                                  group=mpu.get_embedding_group())
+        # torch.distributed.barrier()
+        # print("--allreduce embedding", flush=True)
         # Ensure that encoder(first stage) and decoder(split stage) position
         # embeddings have the same initial parameter values
         # NOTE: We don't currently support T5 with the interleaved schedule.
-        if mpu.is_rank_in_position_embedding_group() and \
-                args.pipeline_model_parallel_split_rank is not None:
-            # TODO: Support tokentype embedding.
-            self.language_model.embedding.cuda()
-            position_embeddings = self.language_model.embedding.position_embeddings
-            torch.distributed.all_reduce(position_embeddings.weight.data,
-                                         group=mpu.get_position_embedding_group())
+        
+        # if mpu.is_rank_in_position_embedding_group() and \
+        #         args.pipeline_model_parallel_split_rank is not None:
+        #     # TODO: Support tokentype embedding.
+        #     self.language_model.embedding.cuda()
+        #     position_embeddings = self.language_model.embedding.position_embeddings
+        #     torch.distributed.all_reduce(position_embeddings.weight.data,
+        #                                  group=mpu.get_position_embedding_group())
+        # torch.distributed.barrier()
+        print("--init word embedding finish", flush=True)
 
 
 def conversion_helper(val, conversion):
