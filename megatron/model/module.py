@@ -117,7 +117,7 @@ class MegatronModule(torch.nn.Module):
                     gathered_embedding_weight = torch.cat(gather_list, dim=0)
                     
                     # all-reduce in embedding group
-                    torch.distributed.all_reduce(gathered_embedding_weight,group=mpu.get_embedding_group())
+                    torch.distributed.all_reduce(gathered_embedding_weight, group=mpu.get_embedding_group())
 
                     # scatter in tp group
                     split_embedding_weight = torch.chunk(gathered_embedding_weight, tp_world_size, dim=0)
@@ -132,10 +132,10 @@ class MegatronModule(torch.nn.Module):
                     torch.distributed.scatter(embedding_weight, scatter_list=None, src=rep_rank, \
                                             group=mpu.get_tensor_model_parallel_group())
             else:
-                torch.distributed.all_reduce(embedding_weight,group=mpu.get_embedding_group())
+                torch.distributed.all_reduce(embedding_weight, group=mpu.get_embedding_group())
         else:
             if mpu.is_rank_in_embedding_group():
-                torch.distributed.all_reduce(self.shared_embedding_or_output_weight().data,group=mpu.get_embedding_group())
+                torch.distributed.all_reduce(self.shared_embedding_or_output_weight().data, group=mpu.get_embedding_group())
 
         # Ensure that encoder(first stage) and decoder(split stage) position
         # embeddings have the same initial parameter values
@@ -161,7 +161,7 @@ class MegatronModule(torch.nn.Module):
                         gathered_embedding_weight = torch.cat(gather_list, dim=0)
                         
                         # all-reduce in positio embedding group
-                        torch.distributed.all_reduce(gathered_embedding_weight,group=mpu.get_position_embedding_group())
+                        torch.distributed.all_reduce(gathered_embedding_weight, group=mpu.get_position_embedding_group())
 
                         # scatter in tp group
                         split_embedding_weight = torch.chunk(gathered_embedding_weight, tp_world_size, dim=0)
@@ -176,7 +176,7 @@ class MegatronModule(torch.nn.Module):
                         torch.distributed.scatter(embedding_weight, scatter_list=None, src=rep_rank, \
                                                 group=mpu.get_tensor_model_parallel_group())
                 else:
-                    torch.distributed.all_reduce(embedding_weight,group=mpu.get_position_embedding_group())
+                    torch.distributed.all_reduce(embedding_weight, group=mpu.get_position_embedding_group())
         else:
             if mpu.is_rank_in_position_embedding_group() and \
                     args.pipeline_model_parallel_split_rank is not None:

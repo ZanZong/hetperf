@@ -17,27 +17,70 @@ def _allreduce_word_embedding_grads(model, config):
     pipelined model parallelism (BERT and GPT-2).
     """
 
-    if (
-        mpu.is_rank_in_embedding_group(ignore_virtual=True)
-        and mpu.get_pipeline_model_parallel_world_size() > 1
-    ):
-        if mpu.is_pipeline_first_stage(ignore_virtual=True):
-            model_module = model[0]
-        elif mpu.is_pipeline_last_stage(ignore_virtual=True):
-            model_module = model[-1]
-        else:  # We do not support the interleaved schedule for T5 yet.
-            model_module = model[0]
+    if mpu.is_rep_rank_in_embedding_group() \
+        and mpu.get_pipeline_model_parallel_world_size() > 1:
+            if mpu.is_pipeline_first_stage(ignore_virtual=True):
+                model_module = model[0]
+            elif mpu.is_pipeline_last_stage(ignore_virtual=True):
+                model_module = model[-1]
+            else:  # We do not support the interleaved schedule for T5 yet.
+                model_module = model[0]
+            model_module = get_attr_wrapped_model(model_module, 'pre_process', return_model_obj=True)
+            if model_module.share_embeddings_and_output_weights:
+                weight = model_module.shared_embedding_or_output_weight()
+                grad = weight.main_grad
 
-        # Look for module with 'pre_process' attribute to get around the fact that DDP and
-        # other wrapper classes inherit from non-core MegatronModule that has
-        # 'share_embeddings_and_output_weights' and 'shared_embedding_or_output_weight'
-        # attributes already, causing get_attr_wrapped_model() to not unwrap anything here.
-        # TODO: Clean this up once the wrapper classes inherit from core MegatronModule.
-        model_module = get_attr_wrapped_model(model_module, 'pre_process', return_model_obj=True)
-        if model_module.share_embeddings_and_output_weights:
-            weight = model_module.shared_embedding_or_output_weight()
-            grad = weight.main_grad
-            torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
+                # heterogeneous piepline grad 'all-reduce' (not real all-reduce)
+                rank = torch.distributed.get_rank()
+                tp_world_size = mpu.get_tensor_model_parallel_world_size()
+                if tp_world_size > 1: # gather from tp group
+                    rep_rank = mpu._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+                    if rank == rep_rank:
+                        # gather in tp group
+                        gather_list = [torch.zeros_like(grad) for _ in range(tp_world_size)]
+                        torch.distributed.gather(grad, gather_list=gather_list, dst=rep_rank, \
+                                                group=mpu.get_tensor_model_parallel_group())
+                        gathered_grad = torch.cat(gather_list, dim=0)
+                        
+                        # all-reduce in embedding group
+                        torch.distributed.all_reduce(gathered_grad, group=mpu.get_embedding_group())
+
+                        # scatter in tp group
+                        split_embedding_weight = torch.chunk(gathered_grad, tp_world_size, dim=0)
+                        scatter_list = list(split_embedding_weight)
+                        torch.distributed.scatter(grad, scatter_list=scatter_list, src=rep_rank, \
+                                                group=mpu.get_tensor_model_parallel_group())
+                    else:
+                        # gather in tp group
+                        torch.distributed.gather(grad, gather_list=None, dst=rep_rank, \
+                                                group=mpu.get_tensor_model_parallel_group())
+                        # scatter in tp group
+                        torch.distributed.scatter(grad, scatter_list=None, src=rep_rank, \
+                                                group=mpu.get_tensor_model_parallel_group())
+                else:
+                    torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
+    else:
+        if (
+            mpu.is_rank_in_embedding_group(ignore_virtual=True)
+            and mpu.get_pipeline_model_parallel_world_size() > 1
+        ):
+            if mpu.is_pipeline_first_stage(ignore_virtual=True):
+                model_module = model[0]
+            elif mpu.is_pipeline_last_stage(ignore_virtual=True):
+                model_module = model[-1]
+            else:  # We do not support the interleaved schedule for T5 yet.
+                model_module = model[0]
+
+            # Look for module with 'pre_process' attribute to get around the fact that DDP and
+            # other wrapper classes inherit from non-core MegatronModule that has
+            # 'share_embeddings_and_output_weights' and 'shared_embedding_or_output_weight'
+            # attributes already, causing get_attr_wrapped_model() to not unwrap anything here.
+            # TODO: Clean this up once the wrapper classes inherit from core MegatronModule.
+            model_module = get_attr_wrapped_model(model_module, 'pre_process', return_model_obj=True)
+            if model_module.share_embeddings_and_output_weights:
+                weight = model_module.shared_embedding_or_output_weight()
+                grad = weight.main_grad
+                torch.distributed.all_reduce(grad, group=mpu.get_embedding_group())
 
 
 def _allreduce_position_embedding_grads(model, config):
@@ -47,24 +90,63 @@ def _allreduce_position_embedding_grads(model, config):
     stay in sync. This should only run for T5 models with pipeline
     parallelism.
     """
-    if (
-        mpu.is_rank_in_position_embedding_group()
-        and mpu.get_pipeline_model_parallel_world_size() > 1
-        and config.pipeline_model_parallel_split_rank is not None
-    ):
-        model_module = model[0]
-        grad = get_attr_wrapped_model(
-            model_module, 'language_model.embedding.position_embeddings.weight.main_grad'
-        )
-        torch.distributed.all_reduce(grad, group=mpu.get_position_embedding_group())
+    if mpu.is_rep_rank_in_position_embedding_group() \
+        and mpu.get_pipeline_model_parallel_world_size() > 1:
+        
+        if mpu._POSITION_EMBEDDING_GLOBAL_RANKS is not None and \
+            len(mpu._POSITION_EMBEDDING_GLOBAL_RANKS) > 1:
+
+            model_module = model[0]
+            grad = get_attr_wrapped_model(
+                model_module, 'language_model.embedding.position_embeddings.weight.main_grad'
+            )
+            
+            rank = torch.distributed.get_rank()
+            tp_world_size = mpu.get_tensor_model_parallel_world_size()
+            if tp_world_size > 1: # gather from tp group
+                rep_rank = mpu._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+                if rank == rep_rank:
+                    # gather in tp group
+                    gather_list = [torch.zeros_like(grad) for _ in range(tp_world_size)]
+                    torch.distributed.gather(grad, gather_list=gather_list, dst=rep_rank, \
+                                            group=mpu.get_tensor_model_parallel_group())
+                    gathered_grad = torch.cat(gather_list, dim=0)
+                    
+                    # all-reduce in positio embedding group
+                    torch.distributed.all_reduce(gathered_grad, group=mpu.get_position_embedding_group())
+
+                    # scatter in tp group
+                    split_embedding_weight = torch.chunk(gathered_grad, tp_world_size, dim=0)
+                    scatter_list = list(split_embedding_weight)
+                    torch.distributed.scatter(grad, scatter_list=scatter_list, src=rep_rank, \
+                                            group=mpu.get_tensor_model_parallel_group())
+                else:
+                    # gather in tp group
+                    torch.distributed.gather(grad, gather_list=None, dst=rep_rank, \
+                                            group=mpu.get_tensor_model_parallel_group())
+                    # scatter in tp group
+                    torch.distributed.scatter(grad, scatter_list=None, src=rep_rank, \
+                                            group=mpu.get_tensor_model_parallel_group())
+            else:
+                torch.distributed.all_reduce(grad, group=mpu.get_position_embedding_group())
+
+    else:
+        if (
+            mpu.is_rank_in_position_embedding_group()
+            and mpu.get_pipeline_model_parallel_world_size() > 1
+            and config.pipeline_model_parallel_split_rank is not None
+        ):
+            model_module = model[0]
+            grad = get_attr_wrapped_model(
+                model_module, 'language_model.embedding.position_embeddings.weight.main_grad'
+            )
+            torch.distributed.all_reduce(grad, group=mpu.get_position_embedding_group())
 
 
 def _allreduce_embedding_grads(model, config):
     """All-reduce both word and position embeddings."""
-    rank = torch.distributed.get_rank()
-    # _allreduce_word_embedding_grads(model, config)
-    print(f"rank:{rank} | done word_embedding all-reduce")
-    # _allreduce_position_embedding_grads(model, config)
+    _allreduce_word_embedding_grads(model, config)
+    _allreduce_position_embedding_grads(model, config)
 
 
 def _allreduce_layernorm_grads(model, config):
@@ -110,7 +192,6 @@ def finalize_model_grads(model):
     for sequence parallelism, and embedding grads across first and
     last pipeline stages (if not tied)."""
 
-    rank = torch.distributed.get_rank()
     config = get_model_config(model[0])
 
     # All-reduce / reduce-scatter across DP replicas.
@@ -120,7 +201,6 @@ def finalize_model_grads(model):
         model_chunk.sync_gradients()
     if config.timers is not None:
         config.timers('all-grads-sync').stop()
-    print(f"rank:{rank} | done DP all-reduce")
 
     # All-reduce layer-norm grads (for sequence parallelism).
     if config.timers is not None:
@@ -130,7 +210,6 @@ def finalize_model_grads(model):
     _allreduce_layernorm_grads(model, config)
     if config.timers is not None:
         config.timers('layernorm-grads-all-reduce').stop()
-    print(f"rank:{rank} | done layer-norm all-reduce")
 
     # All-reduce embedding grads.
     if config.timers is not None:
@@ -140,7 +219,6 @@ def finalize_model_grads(model):
     _allreduce_embedding_grads(model, config)
     if config.timers is not None:
         config.timers('embedding-grads-all-reduce').stop()
-    print(f"rank:{rank} | done embedding all-reduce")
 
     # All-reduce expert grads (for expert parallelism).
     if config.timers is not None:
@@ -150,4 +228,3 @@ def finalize_model_grads(model):
     _allreduce_expert_grads(model, config)
     if config.timers is not None:
         config.timers('expert-grads-all-reduce').stop()
-    print(f"rank:{rank} | done expert all-reduce")
