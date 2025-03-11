@@ -205,7 +205,6 @@ def initialize_model_parallel(
     # graph analyze
     pipe_graph = []
     pipe_depth = []
-    pipe_stage_device = []
     tp_groups = [tp_group for tp_group in parallel_groups["tp"]]
     for deps in pipe_deps:
         devices = sorted(list(set({device for tup in deps for device in tup})))
@@ -915,6 +914,7 @@ def get_pipeline_model_parallel_group():
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
 def get_pipeline_model_parallel_rep_group():
+    """Get the rep group containing all representative ranks in all the pipeline."""
     return _PIPELINE_MODEL_PARALLEL_REP_GROUP
     
 def get_pipeline_model_parallel_group_id():

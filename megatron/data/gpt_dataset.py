@@ -8,6 +8,7 @@ import time
 
 import numpy as np
 import torch
+import torch.distributed
 
 from megatron import print_rank_0
 from megatron.core import mpu
@@ -449,15 +450,23 @@ def _build_index_mappings(name, data_prefix, documents, sizes,
             print('write access to.')
             data_cache_success = False
 
-    counts = torch.cuda.LongTensor([data_cache_success])
-    torch.distributed.all_reduce(counts, group=mpu.get_data_parallel_group())
-    torch.distributed.all_reduce(counts, group=mpu.get_pipeline_model_parallel_rep_group())
-    # TODO check this, currently workaround
-    # if counts[0].item() != (
-    #     torch.distributed.get_world_size() //
-    #     torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group())):
-    #     print_rank_0("Data index creation unsuccessful, exiting.")
-    #     
+    if mpu.get_pipeline_model_parallel_group_id() is None:
+        counts = torch.cuda.LongTensor([data_cache_success])
+        torch.distributed.all_reduce(counts, group=mpu.get_data_parallel_group())
+        torch.distributed.all_reduce(counts, group=mpu.get_pipeline_model_parallel_group())
+        if counts[0].item() != (
+            torch.distributed.get_world_size() //
+            torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group())):
+            print_rank_0("Data index creation unsuccessful, exiting.")
+            exit()
+    else:
+        tp_group_size = torch.distributed.get_world_size(group=mpu.get_tensor_model_parallel_group())
+        counts = torch.cuda.LongTensor([int(data_cache_success) * tp_group_size])
+        torch.distributed.all_reduce(counts, group=mpu.get_pipeline_model_parallel_rep_group())
+        if counts[0].item() != torch.distributed.get_world_size():
+            print_rank_0("Data index creation unsuccessful, exiting.")
+            exit()
+        
 
     # Load mappings.
     start_time = time.time()
