@@ -331,35 +331,41 @@ def initialize_model_parallel(
                         set_pred_and_succ_nodes(args.pipe_graph[index], rep_rank, rank)
                         break
                 assert _PIPELINE_GROUP_ID is not None, 'pipeline group id not found'
+        for nodes_depth in args.pipe_depth:
             # Setup embedding group (to exchange gradients between
             # first and last stages).
-            # TODO set right embedding/position_embedding group
-            if len(ranks) > 1:
-                embedding_ranks = [ranks[0], ranks[-1]]
-                position_embedding_ranks = [ranks[0]]
-                if pipeline_model_parallel_split_rank is not None:
-                    if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
-                        embedding_ranks = [
-                            ranks[0],
-                            ranks[pipeline_model_parallel_split_rank],
-                            ranks[-1],
-                        ]
-                    if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
-                        position_embedding_ranks = [ranks[0], ranks[pipeline_model_parallel_split_rank]]
+            if len(nodes_depth) > 1:
+                max_depth = max(nodes_depth.values())
+                embedding_ranks = \
+                    [node for node, depth in nodes_depth.items() if depth == 0] + \
+                    [node for node, depth in nodes_depth.items() if depth == max_depth]
+                position_embedding_ranks = [node for node, depth in nodes_depth.items() if depth == 0]
+                
+                # TODO set right embedding/position_embedding group with pipeline_model_parallel_split_rank
+                # if pipeline_model_parallel_split_rank is not None:
+                #     if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
+                #         embedding_ranks = [
+                #             ranks[0],
+                #             ranks[pipeline_model_parallel_split_rank],
+                #             ranks[-1],
+                #         ]
+                #     if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
+                #         position_embedding_ranks = [ranks[0], ranks[pipeline_model_parallel_split_rank]]
             else:
-                embedding_ranks = ranks
-                position_embedding_ranks = ranks
+                embedding_ranks = list(nodes_depth.keys())
+                position_embedding_ranks = list(nodes_depth.keys())
 
             group = torch.distributed.new_group(embedding_ranks)
-            if rank in embedding_ranks:
+            rep_rank = _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+            if rep_rank in embedding_ranks:
                 _EMBEDDING_GROUP = group
-            if rank in ranks:
+            if rep_rank in ranks:
                 _EMBEDDING_GLOBAL_RANKS = embedding_ranks
 
             group = torch.distributed.new_group(position_embedding_ranks)
-            if rank in position_embedding_ranks:
+            if rep_rank in position_embedding_ranks:
                 _POSITION_EMBEDDING_GROUP = group
-            if rank in ranks:
+            if rep_rank in ranks:
                 _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
 
         pipeline_model_parallel_rep_group = torch.distributed.new_group(args.rep_ranks)
@@ -712,8 +718,6 @@ def initialize_model_parallel(
             _HETERO_DEVICE_TYPES = list(t.tolist()[0] for t in all_device_types)
             print(f"device memory={torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory/1024/1024/1024}GB", flush=True)
         
-    # print(f"localrank={rank}, pipeline global ranks={get_pipeline_model_parallel_rank()}, prev rank={get_pipeline_model_parallel_prev_rank()}, next rank={get_pipeline_model_parallel_next_rank()}, first rank={get_pipeline_model_parallel_first_rank()}, last rank={get_pipeline_model_parallel_last_rank()}, is first stage={is_pipeline_first_stage()}, is last stage={is_pipeline_last_stage()}", flush=True)
-
 
 def set_micro_batch_dp_dispatcher(graph: nx.DiGraph, micro_batch_size: int):
     """Determine the flow of micro-batch data for the given graph and number of micro-batches."""
@@ -1130,22 +1134,38 @@ def is_pipeline_last_stage(ignore_virtual=False):
     rank = get_pipeline_model_parallel_rank()
     return rank == (get_pipeline_model_parallel_world_size() - 1)
 
+def is_rep_rank_in_embedding_group():
+    """Return true if current rank's representative rank is in embedding group, False otherwise."""
+    if _PIPELINE_GROUP_ID is not None:
+        rep_rank = _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+        return rep_rank in _EMBEDDING_GLOBAL_RANKS
+    return False
 
 def is_rank_in_embedding_group(ignore_virtual=False):
     """Return true if current rank is in embedding group, False otherwise."""
-    rank = torch.distributed.get_rank()
-    global _EMBEDDING_GLOBAL_RANKS
-    if ignore_virtual:
+    if _PIPELINE_GROUP_ID is not None:
+        rank = torch.distributed.get_rank()
+        # TODO consider pipeline_model_parallel_split_rank
         return rank in _EMBEDDING_GLOBAL_RANKS
-    if rank in _EMBEDDING_GLOBAL_RANKS:
-        if rank == _EMBEDDING_GLOBAL_RANKS[0]:
-            return is_pipeline_first_stage(ignore_virtual=False)
-        elif rank == _EMBEDDING_GLOBAL_RANKS[-1]:
-            return is_pipeline_last_stage(ignore_virtual=False)
-        else:
-            return True
-    return False
+    else:
+        rank = torch.distributed.get_rank()
+        if ignore_virtual:
+            return rank in _EMBEDDING_GLOBAL_RANKS
+        if rank in _EMBEDDING_GLOBAL_RANKS:
+            if rank == _EMBEDDING_GLOBAL_RANKS[0]:
+                return is_pipeline_first_stage(ignore_virtual=False)
+            elif rank == _EMBEDDING_GLOBAL_RANKS[-1]:
+                return is_pipeline_last_stage(ignore_virtual=False)
+            else:
+                return True
+        return False
 
+def is_rep_rank_in_position_embedding_group():
+    """Return true if current rank's representative rank is in position embedding group, False otherwise."""
+    if _PIPELINE_GROUP_ID is not None:
+        rep_rank = _TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
+        return rep_rank in _POSITION_EMBEDDING_GLOBAL_RANKS
+    return False
 
 def is_rank_in_position_embedding_group():
     """Return true if current rank is in position embedding group, False otherwise."""
