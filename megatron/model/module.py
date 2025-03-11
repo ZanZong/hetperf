@@ -141,51 +141,13 @@ class MegatronModule(torch.nn.Module):
         # embeddings have the same initial parameter values
         # NOTE: We don't currently support T5 with the interleaved schedule.
         
-        if mpu.is_rep_rank_in_position_embedding_group():
-            if mpu._POSITION_EMBEDDING_GLOBAL_RANKS is not None and \
-                len(mpu._POSITION_EMBEDDING_GLOBAL_RANKS) > 1:
-                
-                self.language_model.embedding.cuda()
-                position_embeddings = self.language_model.embedding.position_embeddings
-                
-                rank = torch.distributed.get_rank()
-                embedding_weight = position_embeddings.data
-                tp_world_size = mpu.get_tensor_model_parallel_world_size()
-                if tp_world_size > 1: # gather from tp group
-                    rep_rank = mpu._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS[0]
-                    if rank == rep_rank:
-                        # gather in tp group
-                        gather_list = [torch.zeros_like(embedding_weight) for _ in range(tp_world_size)]
-                        torch.distributed.gather(embedding_weight, gather_list=gather_list, dst=rep_rank, \
-                                                group=mpu.get_tensor_model_parallel_group())
-                        gathered_embedding_weight = torch.cat(gather_list, dim=0)
-                        
-                        # all-reduce in positio embedding group
-                        torch.distributed.all_reduce(gathered_embedding_weight, group=mpu.get_position_embedding_group())
-
-                        # scatter in tp group
-                        split_embedding_weight = torch.chunk(gathered_embedding_weight, tp_world_size, dim=0)
-                        scatter_list = list(split_embedding_weight)
-                        torch.distributed.scatter(embedding_weight, scatter_list=scatter_list, src=rep_rank, \
-                                                group=mpu.get_tensor_model_parallel_group())
-                    else:
-                        # gather in tp group
-                        torch.distributed.gather(embedding_weight, gather_list=None, dst=rep_rank, \
-                                                group=mpu.get_tensor_model_parallel_group())
-                        # scatter in tp group
-                        torch.distributed.scatter(embedding_weight, scatter_list=None, src=rep_rank, \
-                                                group=mpu.get_tensor_model_parallel_group())
-                else:
-                    torch.distributed.all_reduce(embedding_weight, group=mpu.get_position_embedding_group())
-        else:
-            if mpu.is_rank_in_position_embedding_group() and \
-                    args.pipeline_model_parallel_split_rank is not None:
-                # TODO: Support tokentype embedding.
-                self.language_model.embedding.cuda()
-                position_embeddings = self.language_model.embedding.position_embeddings
-                torch.distributed.all_reduce(position_embeddings.weight.data,
-                                            group=mpu.get_position_embedding_group())
-        print("--init word embedding finish", flush=True)
+        if mpu.is_rank_in_position_embedding_group() and \
+                args.pipeline_model_parallel_split_rank is not None:
+            # TODO: Support tokentype embedding.
+            self.language_model.embedding.cuda()
+            position_embeddings = self.language_model.embedding.position_embeddings
+            torch.distributed.all_reduce(position_embeddings.weight.data,
+                                        group=mpu.get_position_embedding_group())
 
 
 def conversion_helper(val, conversion):
