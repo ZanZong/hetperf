@@ -308,7 +308,11 @@ def initialize_model_parallel(
         
         assert _TENSOR_MODEL_PARALLEL_GROUP is not None, 'tensor model parallel group is not initialized'
         # Build the model-parallel groups. TODO: corner case
-        _MODEL_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
+        for ranks in parallel_groups["pp"]:
+            group = torch.distributed.new_group(ranks)
+            if rank in ranks:
+                _MODEL_PARALLEL_GROUP = group
+        assert _MODEL_PARALLEL_GROUP is not None, 'model parallel group is not initialized'
         
         # Build the pipeline model-parallel groups and embedding groups
         # (first and last rank in each pipeline model-parallel group).
