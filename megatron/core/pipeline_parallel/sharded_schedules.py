@@ -1320,6 +1320,7 @@ def forward_backward_pipelining_without_interleaving(
             checkpoint_activations_microbatch = None
         print(f"rank {local_rank} recv forward {i}, recv_shape {recv_tensor_shapes}", flush=True)
         input_tensor = recv_forward(recv_tensor_shapes, config)
+        print(f"rank {local_rank} after recv forward {i}, send_shape {send_tensor_shapes}", flush=True)
         output_tensor = forward_step(
             forward_step_func,
             data_iterator,
@@ -1335,6 +1336,7 @@ def forward_backward_pipelining_without_interleaving(
         #     print(f"rank 0 stage output_size={output_tensor[0].shape} {send_tensor_shapes}, id={i}", flush=True)
         # if torch.distributed.get_rank() == 1:
         #     print(f"rank 1 stage output_size={output_tensor[0].shape} {send_tensor_shapes}, id={i}", flush=True)
+        print(f"rank {local_rank} before send forward {i}, send_shape {send_tensor_shapes}", flush=True)
         send_forward(output_tensor, send_tensor_shapes, config)
         print(f"rank {local_rank} send forward {i}, send_shape {send_tensor_shapes}", flush=True)
         if not forward_only:

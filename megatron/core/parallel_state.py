@@ -335,9 +335,11 @@ def initialize_model_parallel(
                         set_pred_and_succ_nodes(args.pipe_graph[index], rep_rank, rank)
                         break
                 assert _PIPELINE_GROUP_ID is not None, 'pipeline group id not found'
+        
         for nodes_depth in args.pipe_depth:
             # Setup embedding group (to exchange gradients between
             # first and last stages).
+            ranks = list(nodes_depth.keys())
             if len(nodes_depth) > 1:
                 max_depth = max(nodes_depth.values())
                 embedding_ranks = \
@@ -395,7 +397,7 @@ def initialize_model_parallel(
         _PIPELINE_LAST_STAGE_MICRO_BATCH_SIZES = \
             [cur_pipe_graph.nodes[node]["micro_batch_size"] for node in _PIPELINE_LAST_STAGE_RANKS]
         
-        print(f"rank:{rank} | last_list {_PIPELINE_LAST_STAGE_RANKS} cur_pipe_depth {cur_pipe_depth}")
+        # print(f"rank:{rank} | last_list {_PIPELINE_LAST_STAGE_RANKS} cur_pipe_depth {cur_pipe_depth}")
 
         # if isinstance(_PIPELINE_MODEL_PARALLEL_GROUP, list) and len(_PIPELINE_MODEL_PARALLEL_GROUP) == 1:
         #     _PIPELINE_MODEL_PARALLEL_GROUP = _PIPELINE_MODEL_PARALLEL_GROUP[0]
