@@ -736,7 +736,8 @@ def set_micro_batch_dp_dispatcher(graph: nx.DiGraph, micro_batch_size: int):
         num_successors = len(succ_nodes)
         if num_successors == 0:
             continue
-        assert total_mbs[node] > num_successors, 'micro_batch_size < num_successors, invalid pipeline diagram'
+        assert total_mbs[node] >= num_successors, \
+            f'micro_batch_size {total_mbs[node]} < num_successors {num_successors}, invalid pipeline diagram'
         base_mbs = total_mbs[node] // num_successors
         remain_mbs = total_mbs[node] % num_successors
         for index, succ in enumerate(succ_nodes):
