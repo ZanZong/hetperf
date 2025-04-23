@@ -11,30 +11,19 @@ export LD_LIBRARY_PATH=/usr/lib/python3.11:$LD_LIBRARY_PATH
 
 export MASTER_PORT=$(expr $RANDOM % 10000 + 10000)
 
-# export EXP_NAME=$1
-# export MODEL_NAME=$2
-# export TENSOR_PARALLEL_SIZE=$3
-# export PIPELINE_PARALLEL_SIZE=$4
-# export DATA_PARALLEL_SIZE=$5
-# export GLOBAL_BATCH_SIZE=$6
-# export MICRO_BATCH_SIZE=$7
-# export COMPRESS=0
-# export NODELIST=octave,twills
-# export GPUS_PER_NODE=4
-
 # code repo path
 export REPO_PATH="/home/gmk/hetperf"
 # python venv path
 export SOURCE_PATH="/home/gmk/hetperf-env"
 # parallel config path
-export PARALLEL_CONFIG_FILE="$REPO_PATH/configs/tangram_config.json"
+export PARALLEL_CONFIG_FILE="$REPO_PATH/configs/tangram_config_4_4.json"
 
 export EXP_NAME="hetero-train"
-export MODEL_NAME="GPT-1.3B"
-export GLOBAL_BATCH_SIZE=64
-export MICRO_BATCH_SIZE=8
+export MODEL_NAME="GPT-6.2B"
+export GLOBAL_BATCH_SIZE=128
+export MICRO_BATCH_SIZE=2
 export NODELIST=octave,ja[1-4]
-export WORLD_SIZE=5
+export WORLD_SIZE=8
 
 export NUM_LAYERS=-1
 export HIDDEN_SIZE=-1
@@ -77,11 +66,6 @@ if [ ${MODEL_NAME} == "GPT-11B" ];then
     export NUM_ATTN_HEADS=32
 fi
 
-if [ ${NUM_LAYERS} == -1 ];then
-    echo "model name not found."
-    exit -1
-fi
-
 LOG_DIR=$REPO_PATH/logs/${EXP_NAME}
 mkdir -p $LOG_DIR
 
@@ -102,8 +86,8 @@ srun \
     -N 1 \
     -w octave \
     --job-name=$EXP_NAME \
-	--ntasks-per-node=1 \
-    --gres=gpu:a100:1 \
+	--ntasks-per-node=4 \
+    --gres=gpu:a100:4 \
     --export=ALL \
     bash $REPO_PATH/pretrain.sh : \
     -A public \
@@ -117,24 +101,9 @@ srun \
     --export=ALL \
     bash $REPO_PATH/pretrain.sh
 
-# # single job
 # srun \
-#     -A long \
-#     -p long \
-#     -K \
-#     -N $NNODES \
-#     -w $NODELIST \
-#     --time 20:00 \
-#     --job-name=$EXP_NAME \
-# 	--ntasks-per-node=$GPUS_PER_NODE \
-#     --gres=gpu:v100:$GPUS_PER_NODE \
-#     --export=ALL \
-# 	bash pretrain.sh
-
-# # ja+octave+twills
-# srun \
-#     -A long \
-#     -p long \
+#     -A public \
+#     -p ja \
 #     -K \
 #     -N 4 \
 #     -w ja[1-4] \
@@ -142,47 +111,14 @@ srun \
 #     --ntasks-per-node=1 \
 #     --gres=gpu:v100:1 \
 #     --export=ALL \
-#     bash pretrain.sh : \
-#     -A long \
-#     -p long \
-#     -K \
-#     -N 1 \
-#     -w octave \
-#     --job-name=$EXP_NAME \
-# 	--ntasks-per-node=4 \
-#     --gres=gpu:a100:4 \
-#     --export=ALL \
-# 	bash pretrain.sh : \
-#     -A long \
-#     -p long \
+# 	bash pretrain_4_4.sh : \
+#     -A public \
+#     -p twills \
 #     -K \
 #     -N 1 \
 #     -w twills \
-#     --job-name=$EXP_NAME \
-#     --ntasks-per-node=2 \
-#     --gres=gpu:a10:2 \
-#     --export=ALL \
-#     bash pretrain.sh
-
-# # octave+twills
-# srun \
-#     -A long \
-#     -p long \
-#     -K \
-#     -N 1 \
-#     -w octave \
 #     --job-name=$EXP_NAME \
 #     --ntasks-per-node=4 \
-#     --gres=gpu:a100:4 \
+#     --gres=gpu:v100:2,gpu:a10:2 \
 #     --export=ALL \
-#     bash pretrain.sh : \
-#     -A long \
-#     -p long \
-#     -K \
-#     -N 1 \
-#     -w twills \
-#     --job-name=$EXP_NAME \
-#     --ntasks-per-node=2 \
-#     --gres=gpu:v100:2 \
-#     --export=ALL \
-#     bash pretrain.sh
+#     bash pretrain_4_4.sh

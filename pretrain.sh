@@ -61,7 +61,7 @@ exec python \
         --fp16 \
         --recompute-granularity selective \
         --hetero-cluster True \
-        --parallel-config ./configs/tangram_config_tp.json
+        --parallel-config $PARALLEL_CONFIG_FILE
         # --use-distributed-optimizer \
         # --enable-hetero-compression $COMPRESS \
         # --stage-layer-num $LL
